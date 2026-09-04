@@ -2,7 +2,7 @@
 
 Blazing fast multi-service file uploader. Upload files to multiple hosting services simultaneously — in parallel or one by one — from a single CLI.
 
-> **About this project:** manyup runs entirely offline on your device. No servers, no telemetry, no cloud. Every upload goes directly from your machine to the hosting service. The entire codebase was developed using AI — from architecture to implementation to this README. It's a demonstration of what AI-assisted software engineering looks like in practice.
+> **About this project:** manyup runs entirely offline on your device. No servers, no telemetry, no cloud. Every upload goes directly from your machine to the hosting service. The entire codebase was developed using AI — from architecture to implementation to this README.
 
 ## Features
 

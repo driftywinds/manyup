@@ -16,32 +16,25 @@ import (
 )
 
 const (
-	vfGetServerURL = "https://vikingfile.com/api/get-server"
 	vfGetUploadURL = "https://vikingfile.com/api/get-upload-url"
 	vfCompleteURL  = "https://vikingfile.com/api/complete-upload"
 )
 
-
-
-// VikingFile uploads files via single-POST multipart (primary) with
-// chunked presigned-URL fallback for very large files.
+// VikingFile uploads files via chunked presigned-URL upload.
+// Each part is streamed via io.Pipe so disk reads overlap with network uploads.
 type VikingFile struct{}
 
 func RegisterVikingFile(r *plugin.Registry) {
 	r.Register(&VikingFile{})
 }
 
-func (v *VikingFile) Name() string                { return "vikingfile" }
-func (v *VikingFile) DisplayName() string          { return "VikingFile" }
-func (v *VikingFile) Description() string          { return "VikingFile file hosting (streaming upload)" }
-func (v *VikingFile) RequiredCredentials() []string { return nil }
-func (v *VikingFile) SupportsLargeUpload() bool    { return true }
+func (v *VikingFile) Name() string                 { return "vikingfile" }
+func (v *VikingFile) DisplayName() string           { return "VikingFile" }
+func (v *VikingFile) Description() string           { return "VikingFile file hosting (chunked upload)" }
+func (v *VikingFile) RequiredCredentials() []string  { return nil }
+func (v *VikingFile) SupportsLargeUpload() bool      { return true }
 
 // ── Response types ──────────────────────────────────────────────────
-
-type vfServerResponse struct {
-	Server string `json:"server"`
-}
 
 type vfGetUploadURLResponse struct {
 	UploadID    string   `json:"uploadId"`
@@ -63,154 +56,9 @@ type vfUploadResponse struct {
 	URL  string      `json:"url"`
 }
 
-// ── Upload entry point ──────────────────────────────────────────────
+// ── Upload ──────────────────────────────────────────────────────────
 
 func (v *VikingFile) Upload(
-	ctx context.Context,
-	filename string,
-	reader io.Reader,
-	size int64,
-	creds plugin.Credentials,
-	cfg plugin.Config,
-) (*plugin.UploadResult, error) {
-	// Fast path: legacy single-POST multipart upload.
-	// One connection, one request, streams the whole file — maximum throughput.
-	result, err := v.uploadLegacy(ctx, filename, reader, size, creds, cfg)
-	if err == nil {
-		return result, nil
-	}
-
-	// Fallback: chunked presigned-URL upload for when legacy fails
-	// (e.g. server returns an error for large files).
-	return v.uploadChunked(ctx, filename, reader, size, creds, cfg)
-}
-
-// ── Legacy upload (fast path) ──────────────────────────────────────
-
-func (v *VikingFile) uploadLegacy(
-	ctx context.Context,
-	filename string,
-	reader io.Reader,
-	size int64,
-	creds plugin.Credentials,
-	cfg plugin.Config,
-) (*plugin.UploadResult, error) {
-	// Step 1: Get upload server.
-	server, err := v.getServer(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("vikingfile legacy: %w", err)
-	}
-
-	// Step 2: Build streaming multipart body via io.Pipe.
-	pr, pw := io.Pipe()
-	mw := multipart.NewWriter(pw)
-
-	go func() {
-		defer pw.Close()
-
-		part, err := mw.CreateFormFile("file", filepath.Base(filename))
-		if err != nil {
-			pw.CloseWithError(fmt.Errorf("creating form file: %w", err))
-			return
-		}
-		if _, err := httpclient.Copy(part, reader); err != nil {
-			pw.CloseWithError(fmt.Errorf("streaming file: %w", err))
-			return
-		}
-
-		userHash := ""
-		if u, ok := creds["USER_HASH"]; ok {
-			userHash = u
-		}
-		if err := mw.WriteField("user", userHash); err != nil {
-			pw.CloseWithError(fmt.Errorf("writing user field: %w", err))
-			return
-		}
-
-		if path, ok := cfg["path"]; ok && path != "" {
-			if err := mw.WriteField("path", path); err != nil {
-				pw.CloseWithError(fmt.Errorf("writing path field: %w", err))
-				return
-			}
-		}
-
-		if err := mw.Close(); err != nil {
-			pw.CloseWithError(fmt.Errorf("closing multipart writer: %w", err))
-		}
-	}()
-
-	// Step 3: Single POST — one connection, streaming body.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server, pr)
-	if err != nil {
-		return nil, fmt.Errorf("creating upload request: %w", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-
-	resp, err := httpclient.Get().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("upload failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var uploadResp vfUploadResponse
-	if err := json.Unmarshal(respBody, &uploadResp); err != nil {
-		return nil, fmt.Errorf("parsing response: %w (body: %s)", err, string(respBody))
-	}
-
-	if uploadResp.URL == "" {
-		return nil, fmt.Errorf("no URL in response: %s", string(respBody))
-	}
-
-	fileSize, _ := uploadResp.Size.Int64()
-	return &plugin.UploadResult{
-		Service:  v.Name(),
-		Filename: filename,
-		Size:     fileSize,
-		URL:      uploadResp.URL,
-	}, nil
-}
-
-func (v *VikingFile) getServer(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, vfGetServerURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("creating get-server request: %w", err)
-	}
-
-	resp, err := httpclient.Get().Do(req)
-	if err != nil {
-		return "", fmt.Errorf("get-server failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("get-server returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var serverResp vfServerResponse
-	if err := json.NewDecoder(resp.Body).Decode(&serverResp); err != nil {
-		return "", fmt.Errorf("parsing server response: %w", err)
-	}
-
-	if serverResp.Server == "" {
-		return "", fmt.Errorf("no server returned")
-	}
-
-	return serverResp.Server, nil
-}
-
-// ── Chunked upload (fallback) ──────────────────────────────────────
-
-func (v *VikingFile) uploadChunked(
 	ctx context.Context,
 	filename string,
 	reader io.Reader,
@@ -221,56 +69,59 @@ func (v *VikingFile) uploadChunked(
 	// Step 1: Get presigned upload URLs.
 	uploadInfo, err := v.getUploadURL(ctx, size)
 	if err != nil {
-		return nil, fmt.Errorf("vikingfile chunked: get-upload-url: %w", err)
+		return nil, fmt.Errorf("vikingfile: get-upload-url: %w", err)
 	}
 
 	// Step 2: Upload each part via presigned PUT.
 	parts, err := v.uploadParts(ctx, uploadInfo, reader, size)
 	if err != nil {
-		return nil, fmt.Errorf("vikingfile chunked: upload parts: %w", err)
+		return nil, fmt.Errorf("vikingfile: upload parts: %w", err)
 	}
 
 	// Step 3: Complete the upload.
 	result, err := v.completeUpload(ctx, uploadInfo, filename, parts, creds, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("vikingfile chunked: complete: %w", err)
+		return nil, fmt.Errorf("vikingfile: complete: %w", err)
 	}
 
 	return result, nil
 }
 
+// getUploadURL asks VikingFile for presigned URLs to upload the file in parts.
 func (v *VikingFile) getUploadURL(ctx context.Context, size int64) (*vfGetUploadURLResponse, error) {
 	body := strings.NewReader("size=" + fmt.Sprintf("%d", size))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, vfGetUploadURL, body)
 	if err != nil {
-		return nil, fmt.Errorf("creating get-upload-url request: %w", err)
+		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := httpclient.Get().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("get-upload-url failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("get-upload-url returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var uploadInfo vfGetUploadURLResponse
-	if err := json.NewDecoder(resp.Body).Decode(&uploadInfo); err != nil {
-		return nil, fmt.Errorf("parsing get-upload-url response: %w", err)
+	var info vfGetUploadURLResponse
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
 	}
 
-	if len(uploadInfo.URLs) == 0 {
+	if len(info.URLs) == 0 {
 		return nil, fmt.Errorf("no upload URLs returned")
 	}
 
-	return &uploadInfo, nil
+	return &info, nil
 }
 
+// uploadParts streams each part to its presigned URL via io.Pipe.
+// No part is buffered in memory — disk reads overlap with network uploads.
 func (v *VikingFile) uploadParts(
 	ctx context.Context,
 	info *vfGetUploadURLResponse,
@@ -282,16 +133,27 @@ func (v *VikingFile) uploadParts(
 	for i, uploadURL := range info.URLs {
 		partNum := i + 1
 
+		// Calculate how many bytes this part covers.
 		bytesRead := int64(i) * info.PartSize
 		partSize := info.PartSize
 		if remaining := size - bytesRead; remaining < partSize {
 			partSize = remaining
 		}
 
-		limitedReader := io.LimitReader(reader, partSize)
-		etag, err := v.putPart(ctx, uploadURL, limitedReader, partSize)
+		// Stream the part via io.Pipe: goroutine reads from source, HTTP
+		// client reads from the pipe — disk I/O and network overlap.
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			limited := io.LimitReader(reader, partSize)
+			if _, err := io.Copy(pw, limited); err != nil {
+				pw.CloseWithError(err)
+			}
+		}()
+
+		etag, err := v.putPart(ctx, uploadURL, pr, partSize)
 		if err != nil {
-			return nil, fmt.Errorf("uploading part %d: %w", partNum, err)
+			return nil, fmt.Errorf("PUT part %d: %w", partNum, err)
 		}
 
 		parts = append(parts, vfPartInfo{
@@ -303,6 +165,7 @@ func (v *VikingFile) uploadParts(
 	return parts, nil
 }
 
+// putPart sends one streamed part to its presigned URL and returns the ETag.
 func (v *VikingFile) putPart(ctx context.Context, uploadURL string, reader io.Reader, size int64) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, reader)
 	if err != nil {
@@ -330,6 +193,7 @@ func (v *VikingFile) putPart(ctx context.Context, uploadURL string, reader io.Re
 	return etag, nil
 }
 
+// completeUpload tells VikingFile the upload is done and gets back the download URL.
 func (v *VikingFile) completeUpload(
 	ctx context.Context,
 	info *vfGetUploadURLResponse,
@@ -345,6 +209,7 @@ func (v *VikingFile) completeUpload(
 	mw.WriteField("uploadId", info.UploadID)
 	mw.WriteField("name", filepath.Base(filename))
 
+	// User hash (empty for anonymous).
 	userHash := ""
 	if u, ok := creds["USER_HASH"]; ok {
 		userHash = u
@@ -364,13 +229,13 @@ func (v *VikingFile) completeUpload(
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, vfCompleteURL, &body)
 	if err != nil {
-		return nil, fmt.Errorf("creating complete-upload request: %w", err)
+		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
 	resp, err := httpclient.Get().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("complete-upload failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -380,12 +245,12 @@ func (v *VikingFile) completeUpload(
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("complete-upload returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var uploadResp vfUploadResponse
 	if err := json.Unmarshal(respBody, &uploadResp); err != nil {
-		return nil, fmt.Errorf("parsing complete-upload response: %w (body: %s)", err, string(respBody))
+		return nil, fmt.Errorf("parsing response: %w (body: %s)", err, string(respBody))
 	}
 
 	if uploadResp.URL == "" {

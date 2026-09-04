@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -51,6 +52,7 @@ USAGE:
 COMMANDS:
   upload <file> [file...]     Upload file(s) to selected services
   services                    List available service plugins
+  config menu                 Interactive service selector
   config set <service> <key> <value>   Set a credential
   config show                 Show current configuration
   config mode <parallel|sequential>    Set upload mode
@@ -58,15 +60,11 @@ COMMANDS:
   version                     Print version
 
 EXAMPLES:
+  # Interactive service selector
+  manyup config menu
+
   # Configure a service
   manyup config set gofile API_KEY mytoken123
-
-  # Select services
-  manyup config select gofile
-  manyup config select buzzheavier
-
-  # Set parallel mode
-  manyup config mode parallel
 
   # Upload a file
   manyup upload myfile.zip
@@ -164,11 +162,13 @@ func cmdConfig() {
 
 	args := os.Args[2:]
 	if len(args) == 0 {
-		printConfigUsage()
-		os.Exit(0)
+		cmdConfigMenu()
+		return
 	}
 
 	switch args[0] {
+	case "menu":
+		cmdConfigMenu()
 	case "set":
 		if len(args) < 4 {
 			fmt.Fprintln(os.Stderr, "Usage: manyup config set <service> <key> <value>")
@@ -242,11 +242,109 @@ func printConfigUsage() {
 	fmt.Print(`Usage: manyup config <command>
 
 Commands:
+  menu                          Interactive service selector
   set <service> <key> <value>   Set a credential for a service
   show                          Show current configuration
   mode <parallel|sequential>    Set upload mode
   select <service>              Toggle a service on/off
 `)
+}
+
+// ── Interactive config menu ─────────────────────────────────────────
+
+func cmdConfigMenu() {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	registry := services.All()
+	names := registry.Names()
+
+	// Build selection set from current config.
+	selected := make(map[string]bool)
+	for _, s := range cfg.SelectedServices {
+		selected[s] = true
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		// Clear screen and draw menu.
+		fmt.Print("\033[2J\033[H")
+		fmt.Println("manyup — Select upload services")
+		fmt.Println(strings.Repeat("─", 40))
+		fmt.Println()
+
+		for i, name := range registry.Names() {
+		svc, _ := registry.Get(name)
+		marker := " "
+		if selected[name] {
+			marker = "x"
+		}
+		fmt.Printf("  %d. [%s] %-14s %s\n", i+1, marker, svc.DisplayName(), svc.Description())
+		}
+
+		fmt.Println()
+		fmt.Printf("  Upload mode: %s\n", cfg.UploadMode)
+		fmt.Println()
+		fmt.Println("  Commands:")
+		fmt.Println("    <number>  Toggle service")
+		fmt.Println("    a         Select all")
+		fmt.Println("    n         Deselect all")
+		fmt.Println("    m         Toggle parallel/sequential")
+		fmt.Println("    Enter     Save and exit")
+		fmt.Println()
+		fmt.Print("  > ")
+
+		line, _ := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+
+		if line == "" {
+			break
+		}
+
+		switch {
+		case line == "a":
+			for _, name := range names {
+				selected[name] = true
+			}
+		case line == "n":
+			for _, name := range names {
+				selected[name] = false
+			}
+		case line == "m":
+			if cfg.UploadMode == config.ModeParallel {
+				cfg.UploadMode = config.ModeSequential
+			} else {
+				cfg.UploadMode = config.ModeParallel
+			}
+		default:
+			// Try to parse as a number.
+			var idx int
+			if _, scanErr := fmt.Sscanf(line, "%d", &idx); scanErr == nil && idx >= 1 && idx <= len(names) {
+				name := names[idx-1]
+				selected[name] = !selected[name]
+			}
+		}
+	}
+
+	// Save selection.
+	cfg.SelectedServices = nil
+	for _, name := range names {
+		if selected[name] {
+			cfg.SelectedServices = append(cfg.SelectedServices, name)
+		}
+	}
+
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Print("\033[2J\033[H")
+	fmt.Printf("✓ Saved. Services: %s\n", strings.Join(cfg.SelectedServices, ", "))
 }
 
 func printConfig(cfg *config.AppConfig) {
