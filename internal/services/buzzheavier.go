@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/multiuploader/manyup/internal/httpclient"
 	"github.com/multiuploader/manyup/internal/plugin"
 )
 
@@ -79,8 +80,7 @@ func (b *BuzzHeavier) Upload(
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	client := &http.Client{Timeout: bhAPITimeout}
-	resp, err := client.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("buzzheavier: upload failed: %w", err)
 	}

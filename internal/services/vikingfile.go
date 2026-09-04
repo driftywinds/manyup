@@ -10,29 +10,18 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"time"
 
+	"github.com/multiuploader/manyup/internal/httpclient"
 	"github.com/multiuploader/manyup/internal/plugin"
 )
 
 const (
-	vfGetServerURL   = "https://vikingfile.com/api/get-server"
-	vfGetUploadURL   = "https://vikingfile.com/api/get-upload-url"
-	vfCompleteURL    = "https://vikingfile.com/api/complete-upload"
-	vfAPITimeout     = 300 * time.Second
-	vfConnectTimeout = 10 * time.Second
+	vfGetServerURL = "https://vikingfile.com/api/get-server"
+	vfGetUploadURL = "https://vikingfile.com/api/get-upload-url"
+	vfCompleteURL  = "https://vikingfile.com/api/complete-upload"
 )
 
-// sharedClient is reused across all VikingFile requests for connection pooling.
-var sharedClient = &http.Client{
-	Timeout: vfAPITimeout,
-	Transport: &http.Transport{
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: vfConnectTimeout,
-	},
-}
+
 
 // VikingFile uploads files via single-POST multipart (primary) with
 // chunked presigned-URL fallback for very large files.
@@ -124,7 +113,7 @@ func (v *VikingFile) uploadLegacy(
 			pw.CloseWithError(fmt.Errorf("creating form file: %w", err))
 			return
 		}
-		if _, err := io.Copy(part, reader); err != nil {
+		if _, err := httpclient.Copy(part, reader); err != nil {
 			pw.CloseWithError(fmt.Errorf("streaming file: %w", err))
 			return
 		}
@@ -157,7 +146,7 @@ func (v *VikingFile) uploadLegacy(
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	resp, err := sharedClient.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("upload failed: %w", err)
 	}
@@ -196,7 +185,7 @@ func (v *VikingFile) getServer(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("creating get-server request: %w", err)
 	}
 
-	resp, err := sharedClient.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("get-server failed: %w", err)
 	}
@@ -259,7 +248,7 @@ func (v *VikingFile) getUploadURL(ctx context.Context, size int64) (*vfGetUpload
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := sharedClient.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("get-upload-url failed: %w", err)
 	}
@@ -322,7 +311,7 @@ func (v *VikingFile) putPart(ctx context.Context, uploadURL string, reader io.Re
 	req.ContentLength = size
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	resp, err := sharedClient.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -379,7 +368,7 @@ func (v *VikingFile) completeUpload(
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	resp, err := sharedClient.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("complete-upload failed: %w", err)
 	}

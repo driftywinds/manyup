@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/multiuploader/manyup/internal/httpclient"
 	"github.com/multiuploader/manyup/internal/plugin"
 )
 
@@ -96,8 +97,7 @@ func (z *ZincDrive) getSignedURL(ctx context.Context, filename, apiKey string) (
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-API-Key", apiKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -130,8 +130,7 @@ func (z *ZincDrive) putFile(ctx context.Context, sign *zdSignResponse, reader io
 		req.Header.Set("Content-Type", "application/octet-stream")
 	}
 
-	client := &http.Client{Timeout: zdAPITimeout}
-	resp, err := client.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return err
 	}
@@ -167,8 +166,7 @@ func (z *ZincDrive) confirmUpload(ctx context.Context, key, filename string, siz
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-API-Key", apiKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return "", err
 	}

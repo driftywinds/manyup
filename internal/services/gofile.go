@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/multiuploader/manyup/internal/httpclient"
 	"github.com/multiuploader/manyup/internal/plugin"
 )
 
@@ -80,9 +81,7 @@ func (g *GoFile) Upload(
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	// Execute with a reasonable timeout.
-	client := &http.Client{Timeout: gofileAPITimeout}
-	resp, err := client.Do(req)
+	resp, err := httpclient.Get().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("gofile: upload failed: %w", err)
 	}
@@ -148,10 +147,8 @@ func (g *GoFile) buildMultipartBody(
 		if err != nil {
 			pw.CloseWithError(fmt.Errorf("creating form file: %w", err))
 			return
-		}
-
-		// Stream the file content directly into the multipart writer.
-		if _, err := io.Copy(part, reader); err != nil {
+		}			// Stream the file content directly into the multipart writer.
+			if _, err := httpclient.Copy(part, reader); err != nil {
 			pw.CloseWithError(fmt.Errorf("streaming file: %w", err))
 			return
 		}
