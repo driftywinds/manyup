@@ -41,17 +41,17 @@ func DefaultConfig() *AppConfig {
 }
 
 // ConfigDir returns the platform-appropriate config directory.
-// On Windows: %APPDATA%/multiuploader
-// On others:  ~/.config/multiuploader
+// On Windows: %APPDATA%/manyup
+// On others:  ~/.config/manyup
 func ConfigDir() string {
 	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		return filepath.Join(dir, "multiuploader")
+		return filepath.Join(dir, "manyup")
 	}
 	if home := os.Getenv("APPDATA"); home != "" {
-		return filepath.Join(home, "multiuploader")
+		return filepath.Join(home, "manyup")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "multiuploader")
+	return filepath.Join(home, ".config", "manyup")
 }
 
 func configPath() string {

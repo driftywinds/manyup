@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/multiuploader/multiuploader/internal/config"
-	"github.com/multiuploader/multiuploader/internal/plugin"
+	"github.com/multiuploader/manyup/internal/config"
+	"github.com/multiuploader/manyup/internal/plugin"
 )
 
 // Progress is emitted on the Progress channel during uploads.
@@ -227,7 +227,7 @@ func (m *UploadManager) validateCredentials(svc plugin.Uploader) error {
 	creds := m.getCredentials(svc.Name())
 	for _, key := range svc.RequiredCredentials() {
 		if _, ok := creds[key]; !ok {
-			return fmt.Errorf("missing credential %q (set via config or env %s_%s)", key, "MULTIUPLOADER", key)
+			return fmt.Errorf("missing credential %q (set via config or env %s_%s)", key, "MANYUP", key)
 		}
 	}
 	return nil
@@ -239,7 +239,7 @@ func (m *UploadManager) getCredentials(service string) plugin.Credentials {
 
 	// Env vars as fallback.
 	for _, key := range []string{"API_KEY", "TOKEN", "USERNAME", "PASSWORD"} {
-		envKey := fmt.Sprintf("MULTIUPLOADER_%s_%s", uppercase(service), key)
+		envKey := fmt.Sprintf("MANYUP_%s_%s", uppercase(service), key)
 		if v := os.Getenv(envKey); v != "" {
 			out[key] = v
 		}

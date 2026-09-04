@@ -9,7 +9,7 @@
 package services
 
 import (
-	"github.com/multiuploader/multiuploader/internal/plugin"
+	"github.com/multiuploader/manyup/internal/plugin"
 )
 
 // All returns a new registry pre-loaded with every built-in service plugin.

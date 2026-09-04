@@ -11,9 +11,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/multiuploader/multiuploader/internal/config"
-	"github.com/multiuploader/multiuploader/internal/services"
-	"github.com/multiuploader/multiuploader/internal/uploader"
+	"github.com/multiuploader/manyup/internal/config"
+	"github.com/multiuploader/manyup/internal/services"
+	"github.com/multiuploader/manyup/internal/uploader"
 )
 
 var version = "0.1.0"
@@ -32,7 +32,7 @@ func main() {
 	case "config":
 		cmdConfig()
 	case "version":
-		fmt.Printf("multiuploader %s\n", version)
+		fmt.Printf("manyup %s\n", version)
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -43,10 +43,10 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Print(`multiuploader — Blazing fast multi-service file uploader
+	fmt.Print(`manyup — Blazing fast multi-service file uploader
 
 USAGE:
-  multiuploader <command> [options]
+  manyup <command> [options]
 
 COMMANDS:
   upload <file> [file...]     Upload file(s) to selected services
@@ -59,30 +59,30 @@ COMMANDS:
 
 EXAMPLES:
   # Configure a service
-  multiuploader config set gofile API_KEY mytoken123
+  manyup config set gofile API_KEY mytoken123
 
   # Select services
-  multiuploader config select gofile
-  multiuploader config select buzzheavier
+  manyup config select gofile
+  manyup config select buzzheavier
 
   # Set parallel mode
-  multiuploader config mode parallel
+  manyup config mode parallel
 
   # Upload a file
-  multiuploader upload myfile.zip
+  manyup upload myfile.zip
 
   # Upload multiple files
-  multiuploader upload *.zip
+  manyup upload *.zip
 
 ENVIRONMENT VARIABLES:
   Credentials can also be set via env vars:
-    MULTIUPLOADER_<SERVICE>_<KEY>  e.g. MULTIUPLOADER_GOFILE_API_KEY=xxx
+    MANYUP_<SERVICE>_<KEY>  e.g. MANYUP_GOFILE_API_KEY=xxx
 `)
 }
 
 func cmdUpload() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: multiuploader upload <file> [file...]")
+		fmt.Fprintln(os.Stderr, "Usage: manyup upload <file> [file...]")
 		os.Exit(1)
 	}
 
@@ -93,7 +93,7 @@ func cmdUpload() {
 	}
 
 	if len(cfg.SelectedServices) == 0 {
-		fmt.Fprintln(os.Stderr, "No services selected. Use 'multiuploader config select <service>' first.")
+		fmt.Fprintln(os.Stderr, "No services selected. Use 'manyup config select <service>' first.")
 		os.Exit(1)
 	}
 
@@ -171,7 +171,7 @@ func cmdConfig() {
 	switch args[0] {
 	case "set":
 		if len(args) < 4 {
-			fmt.Fprintln(os.Stderr, "Usage: multiuploader config set <service> <key> <value>")
+			fmt.Fprintln(os.Stderr, "Usage: manyup config set <service> <key> <value>")
 			os.Exit(1)
 		}
 		service, key, value := args[1], args[2], args[3]
@@ -188,7 +188,7 @@ func cmdConfig() {
 	case "mode":
 		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "Current mode: %s\n", cfg.UploadMode)
-			fmt.Fprintln(os.Stderr, "Usage: multiuploader config mode <parallel|sequential>")
+			fmt.Fprintln(os.Stderr, "Usage: manyup config mode <parallel|sequential>")
 			os.Exit(1)
 		}
 		mode := config.UploadMode(args[1])
@@ -205,7 +205,7 @@ func cmdConfig() {
 
 	case "select":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: multiuploader config select <service>")
+			fmt.Fprintln(os.Stderr, "Usage: manyup config select <service>")
 			os.Exit(1)
 		}
 		service := args[1]
@@ -239,7 +239,7 @@ func cmdConfig() {
 }
 
 func printConfigUsage() {
-	fmt.Print(`Usage: multiuploader config <command>
+	fmt.Print(`Usage: manyup config <command>
 
 Commands:
   set <service> <key> <value>   Set a credential for a service

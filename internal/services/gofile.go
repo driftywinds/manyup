@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/multiuploader/multiuploader/internal/plugin"
+	"github.com/multiuploader/manyup/internal/plugin"
 )
 
 const (
