@@ -76,7 +76,7 @@ func (b *BuzzHeavier) Upload(
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	// Add auth header if account ID is provided.
-	if token, ok := creds["API_TOKEN"]; ok && token != "" {
+	if token, ok := creds["ACCOUNT_ID"]; ok && token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 

@@ -77,7 +77,7 @@ func (g *GoFile) Upload(
 	req.Header.Set("Content-Type", contentType)
 
 	// Add auth header if token is available.
-	if token, ok := creds["API_TOKEN"]; ok && token != "" {
+	if token, ok := creds["TOKEN"]; ok && token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 

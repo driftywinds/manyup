@@ -33,7 +33,7 @@ func RegisterDataNodes(r *plugin.Registry) {
 func (d *DataNodes) Name() string                  { return "datanodes" }
 func (d *DataNodes) DisplayName() string            { return "DataNodes" }
 func (d *DataNodes) Description() string             { return "DataNodes file hosting (API key, multipart upload)" }
-func (d *DataNodes) RequiredCredentials() []string   { return []string{"API_TOKEN"} }
+func (d *DataNodes) RequiredCredentials() []string   { return []string{"API_KEY"} }
 func (d *DataNodes) SupportsLargeUpload() bool       { return true }
 
 // dnServerResponse is returned by GET /api/upload/server.
@@ -59,9 +59,9 @@ func (d *DataNodes) Upload(
 	creds plugin.Credentials,
 	cfg plugin.Config,
 ) (*plugin.UploadResult, error) {
-	apiKey, ok := creds["API_TOKEN"]
+	apiKey, ok := creds["API_KEY"]
 	if !ok || apiKey == "" {
-		return nil, fmt.Errorf("datanodes: API_TOKEN required")
+		return nil, fmt.Errorf("datanodes: API_KEY required")
 	}
 
 	// Step 1: Request an upload server and session id.

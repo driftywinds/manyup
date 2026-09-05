@@ -75,7 +75,7 @@ EXAMPLES:
   manyup config menu
 
   # Configure a service
-  manyup config set gofile API_TOKEN mytoken123
+  manyup config set gofile API_KEY mytoken123
 
   # Upload a file
   manyup upload myfile.zip
@@ -85,7 +85,7 @@ EXAMPLES:
 
 ENVIRONMENT VARIABLES:
   Credentials can also be set via env vars:
-    MANYUP_<SERVICE>_API_TOKEN  e.g. MANYUP_GOFILE_API_TOKEN=xxx
+    MANYUP_<SERVICE>_<KEY>  e.g. MANYUP_GOFILE_API_KEY=xxx
 `)
 }
 

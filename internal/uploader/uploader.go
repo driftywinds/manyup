@@ -238,7 +238,7 @@ func (m *UploadManager) getCredentials(service string) plugin.Credentials {
 	out := make(plugin.Credentials)
 
 	// Env vars as fallback.
-	for _, key := range []string{"API_TOKEN"} {
+	for _, key := range []string{"API_KEY", "TOKEN", "USERNAME", "PASSWORD"} {
 		envKey := fmt.Sprintf("MANYUP_%s_%s", uppercase(service), key)
 		if v := os.Getenv(envKey); v != "" {
 			out[key] = v

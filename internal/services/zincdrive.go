@@ -30,7 +30,7 @@ func RegisterZincDrive(r *plugin.Registry) {
 func (z *ZincDrive) Name() string                  { return "zincdrive" }
 func (z *ZincDrive) DisplayName() string            { return "ZincDrive" }
 func (z *ZincDrive) Description() string             { return "ZincDrive S3 direct upload (up to 10GB)" }
-func (z *ZincDrive) RequiredCredentials() []string   { return []string{"API_TOKEN"} }
+func (z *ZincDrive) RequiredCredentials() []string   { return []string{"API_KEY"} }
 func (z *ZincDrive) SupportsLargeUpload() bool       { return true }
 
 // zdSignResponse is returned by POST /s3/sign.
@@ -56,9 +56,9 @@ func (z *ZincDrive) Upload(
 	creds plugin.Credentials,
 	cfg plugin.Config,
 ) (*plugin.UploadResult, error) {
-	apiKey, ok := creds["API_TOKEN"]
+	apiKey, ok := creds["API_KEY"]
 	if !ok || apiKey == "" {
-		return nil, fmt.Errorf("zincdrive: API_TOKEN required")
+		return nil, fmt.Errorf("zincdrive: API_KEY required")
 	}
 
 	// Step 1: Get presigned URL.

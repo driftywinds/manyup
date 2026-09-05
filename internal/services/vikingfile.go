@@ -211,7 +211,7 @@ func (v *VikingFile) completeUpload(
 
 	// User hash (empty for anonymous).
 	userHash := ""
-	if u, ok := creds["API_TOKEN"]; ok {
+	if u, ok := creds["USER_HASH"]; ok {
 		userHash = u
 	}
 	mw.WriteField("user", userHash)
