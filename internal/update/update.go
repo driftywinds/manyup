@@ -153,8 +153,24 @@ func (r *ReleaseInfo) FindAsset(platform string) (string, error) {
 
 // DownloadAndReplace downloads the new binary and replaces the current one
 func DownloadAndReplace(downloadURL, currentVersion string) error {
+	// Create an HTTP client with tuned settings for speed
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        1,
+			MaxIdleConnsPerHost: 1,
+			IdleConnTimeout:     10 * time.Second,
+		},
+	}
+
 	// Download the new binary
-	resp, err := http.Get(downloadURL)
+	req, err := http.NewRequest("GET", downloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download: %w", err)
 	}
@@ -164,24 +180,31 @@ func DownloadAndReplace(downloadURL, currentVersion string) error {
 		return fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
 
-	// Create a temporary file to download to
-	tmpFile, err := os.CreateTemp("", "manyup-update-*")
+	// Create a temporary file to download to - use temp dir on same filesystem for fast rename
+	tmpDir, err := os.MkdirTemp("", "manyup-update-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpFile, err := os.CreateTemp(tmpDir, "manyup-binary-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
 
-	// Download with progress
-	n, err := io.Copy(tmpFile, io.TeeReader(resp.Body, progressWriter{}))
+	// Download with progress tracking
+	progress := &progressWriter{}
+	teeReader := io.TeeReader(resp.Body, progress)
+	n, err := io.Copy(tmpFile, teeReader)
+	tmpFile.Close()
 	if err != nil {
-		tmpFile.Close()
 		return fmt.Errorf("download failed: %w", err)
 	}
-	tmpFile.Close()
-
 	if n == 0 {
 		return fmt.Errorf("downloaded file is empty")
 	}
+	fmt.Println() // New line after progress dots
 
 	// Get the current executable path
 	execPath, err := os.Executable()
@@ -189,24 +212,35 @@ func DownloadAndReplace(downloadURL, currentVersion string) error {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
+	// Get the directory of the executable for the rename
+	execDir := filepath.Dir(execPath)
+
 	// On Windows, we can't replace a running executable directly
-	// We need to use a different approach
 	if runtime.GOOS == "windows" {
 		return replaceOnWindows(execPath, tmpFile.Name())
 	}
 
+	// Move temp file to the executable's directory for atomic rename
+	// This ensures we're on the same filesystem for a fast rename
+	finalTempPath := filepath.Join(execDir, ".manyup_update_tmp")
+	if err := os.Rename(tmpFile.Name(), finalTempPath); err != nil {
+		return fmt.Errorf("failed to move temp file: %w", err)
+	}
+	defer os.Remove(finalTempPath)
+
 	// Make the temp file executable
-	if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
+	if err := os.Chmod(finalTempPath, 0755); err != nil {
 		return fmt.Errorf("failed to make temp file executable: %w", err)
 	}
 
-	// Replace the current binary
-	if err := os.Rename(tmpFile.Name(), execPath); err != nil {
+	// Replace the current binary with atomic rename
+	if err := os.Rename(finalTempPath, execPath); err != nil {
 		return fmt.Errorf("failed to replace binary: %w", err)
 	}
 
 	return nil
 }
+
 
 // replaceOnWindows handles Windows-specific binary replacement
 func replaceOnWindows(execPath, tmpFile string) error {
