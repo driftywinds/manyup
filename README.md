@@ -58,6 +58,7 @@ manyup <command> [options]
 | `manyup config mode <parallel\|sequential>` | Set upload mode |
 | `manyup config select <service>` | Toggle a service on/off |
 | `manyup version` | Print version |
+| `manyup update` / `manyup -U` | Check for and apply updates |
 | `manyup help` | Show usage |
 
 ### Quick start

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/multiuploader/manyup/internal/config"
-	"github.com/multiuploader/manyup/internal/plugin"
+	"github.com/driftywinds/manyup/internal/config"
+	"github.com/driftywinds/manyup/internal/plugin"
 )
 
 // Progress is emitted on the Progress channel during uploads.

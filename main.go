@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
-	"github.com/multiuploader/manyup/internal/config"
-	"github.com/multiuploader/manyup/internal/services"
-	"github.com/multiuploader/manyup/internal/uploader"
+	"github.com/driftywinds/manyup/internal/config"
+	"github.com/driftywinds/manyup/internal/services"
+	"github.com/driftywinds/manyup/internal/uploader"
+	"github.com/driftywinds/manyup/internal/update"
 )
 
 var version = "0.1.0"
@@ -23,6 +25,12 @@ func main() {
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(0)
+	}
+
+	// Handle -U / --update flags
+	if os.Args[1] == "-U" || os.Args[1] == "--update" {
+		cmdUpdate()
+		return
 	}
 
 	switch os.Args[1] {
@@ -34,6 +42,8 @@ func main() {
 		cmdConfig()
 	case "version":
 		fmt.Printf("manyup %s\n", version)
+	case "update", "-U", "--update":
+		cmdUpdate()
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -58,6 +68,7 @@ COMMANDS:
   config mode <parallel|sequential>    Set upload mode
   config select <service>     Toggle a service on/off
   version                     Print version
+  update, -U, --update       Check for and apply updates
 
 EXAMPLES:
   # Interactive service selector
@@ -530,4 +541,55 @@ func printResult(result *uploader.MultiResult) {
 	}
 	fmt.Printf("  Total time: %.1fs\n", result.TotalTime)
 	fmt.Println(strings.Repeat("─", 60))
+}
+
+// ── Platform detection ──────────────────────────────────────────────────
+
+func detectPlatform() string {
+	return runtime.GOOS + "-" + runtime.GOARCH
+}
+
+// ── Update command ──────────────────────────────────────────────────────
+
+func cmdUpdate() {
+	fmt.Println("Checking for updates...")
+	platform := detectPlatform()
+
+	// Parse current version (strip v prefix if present)
+	currentSemVer, err := update.ParseSemVer(version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing current version %s: %v\n", version, err)
+		os.Exit(1)
+	}
+
+	latest, err := update.CheckLatest()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking for updates: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Compare semantically
+	if !latest.Version.IsNewer(currentSemVer) {
+		fmt.Printf("✓ manyup %s is already the latest version.\n", currentSemVer.String())
+		return
+	}
+
+	fmt.Printf("Current version: %s\n", currentSemVer.String())
+	fmt.Printf("Latest version:  %s\n", latest.TagName)
+	fmt.Printf("Platform:        %s\n", platform)
+
+	assetURL, err := latest.FindAsset(platform)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nDownloading %s...\n", latest.TagName)
+	if err := update.DownloadAndReplace(assetURL, version); err != nil {
+		fmt.Fprintf(os.Stderr, "Error updating: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✓ Updated to %s successfully!\n", latest.TagName)
+	fmt.Println("Run 'manyup version' to confirm.")
 }

@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/multiuploader/manyup/internal/httpclient"
-	"github.com/multiuploader/manyup/internal/plugin"
+	"github.com/driftywinds/manyup/internal/httpclient"
+	"github.com/driftywinds/manyup/internal/plugin"
 )
 
 const (
