@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 )
 
@@ -98,5 +99,6 @@ func (r *Registry) Names() []string {
 	for k := range r.plugins {
 		names = append(names, k)
 	}
+	sort.Strings(names)
 	return names
 }

@@ -277,13 +277,13 @@ func cmdConfigMenu() {
 		fmt.Println(strings.Repeat("─", 40))
 		fmt.Println()
 
-		for i, name := range registry.Names() {
-		svc, _ := registry.Get(name)
-		marker := " "
-		if selected[name] {
-			marker = "x"
-		}
-		fmt.Printf("  %d. [%s] %-14s %s\n", i+1, marker, svc.DisplayName(), svc.Description())
+		for i, name := range names {
+			svc, _ := registry.Get(name)
+			marker := " "
+			if selected[name] {
+				marker = "x"
+			}
+			fmt.Printf("  %d. [%s] %-14s %s\n", i+1, marker, svc.DisplayName(), svc.Description())
 		}
 
 		fmt.Println()

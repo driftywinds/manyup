@@ -6,7 +6,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 ## Features
 
-- **Multi-service uploads** — BuzzHeavier, GoFile, VikingFile, and ZincDrive out of the box
+- **Multi-service uploads** — BuzzHeavier, DataNodes, GoFile, VikingFile, and ZincDrive out of the box
 - **Parallel or sequential** — upload to all selected services at once, or one at a time
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
 - **Plugin architecture** — add new hosting services by implementing a single Go interface
@@ -20,6 +20,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 | Service | Auth | Upload Method | Max Size |
 |---|---|---|---|
 | [BuzzHeavier](https://buzzheavier.com) | Optional (ACCOUNT_ID) | Raw PUT | Unlimited |
+| [DataNodes](https://datanodes.to) | **Required** (API_KEY) | Two-step multipart POST | 3 GB free / unlimited premium |
 | [GoFile](https://gofile.io) | Optional (TOKEN) | Multipart POST | Unlimited |
 | [VikingFile](https://vikingfile.com) | Optional (USER_HASH) | Streaming multipart | Unlimited |
 | [ZincDrive](https://zincdrive.com) | **Required** (API_KEY) | S3 presigned PUT | 10 GB |
@@ -75,9 +76,12 @@ manyup upload myfile.zip
 
 ### Configure credentials
 
-Only needed for services that require authentication (currently only ZincDrive):
+Only needed for services that require authentication (currently DataNodes and ZincDrive):
 
 ```bash
+# DataNodes (required)
+manyup config set datanodes API_KEY your_api_key_here
+
 # ZincDrive (required)
 manyup config set zincdrive API_KEY your_api_key_here
 
@@ -125,6 +129,7 @@ Config is stored in a JSON file at:
 Credentials can also be set via environment variables instead of the config file:
 
 ```bash
+export MANYUP_DATANODES_API_KEY=your_key
 export MANYUP_ZINCDRIVE_API_KEY=your_key
 export MANYUP_GOFILE_TOKEN=your_token
 manyup upload myfile.zip
@@ -150,6 +155,7 @@ manyup/
 │   └── services/
 │       ├── registry.go              # Central service registration
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
+│       ├── datanodes.go             # DataNodes plugin (two-step multipart API)
 │       ├── gofile.go                # GoFile plugin (multipart upload)
 │       ├── vikingfile.go            # VikingFile plugin (legacy + chunked fallback)
 │       └── zincdrive.go             # ZincDrive plugin (S3 presigned upload)

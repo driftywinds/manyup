@@ -18,6 +18,7 @@ func All() *plugin.Registry {
 	// Each service's init() calls r.Register(), but since init runs on import
 	// we register explicitly here for clarity and testability.
 	RegisterBuzzHeavier(r)
+	RegisterDataNodes(r)
 	RegisterGoFile(r)
 	RegisterVikingFile(r)
 	RegisterZincDrive(r)
