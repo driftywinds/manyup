@@ -38,7 +38,7 @@ type Uploader interface {
 	Description() string
 
 	// RequiredCredentials returns the env-var / config keys this service needs
-	// (e.g. "API_KEY", "TOKEN"). The registry uses this for validation.
+	// (e.g. "API_TOKEN"). The registry uses this for validation.
 	RequiredCredentials() []string
 
 	// Upload streams the file to the service and returns a result.

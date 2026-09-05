@@ -85,7 +85,7 @@ EXAMPLES:
 
 ENVIRONMENT VARIABLES:
   Credentials can also be set via env vars:
-    MANYUP_<SERVICE>_<KEY>  e.g. MANYUP_GOFILE_API_KEY=xxx
+    MANYUP_<SERVICE>_API_TOKEN  e.g. MANYUP_GOFILE_API_TOKEN=xxx
 `)
 }
 

@@ -19,11 +19,11 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 | Service | Auth | Upload Method | Max Size |
 |---|---|---|---|
-| [BuzzHeavier](https://buzzheavier.com) | Optional (ACCOUNT_ID) | Raw PUT | Unlimited |
-| [DataNodes](https://datanodes.to) | **Required** (API_KEY) | Two-step multipart POST | 3 GB free / unlimited premium |
-| [GoFile](https://gofile.io) | Optional (TOKEN) | Multipart POST | Unlimited |
-| [VikingFile](https://vikingfile.com) | Optional (USER_HASH) | Streaming multipart | Unlimited |
-| [ZincDrive](https://zincdrive.com) | **Required** (API_KEY) | S3 presigned PUT | 10 GB |
+| [BuzzHeavier](https://buzzheavier.com) | Optional (API_TOKEN) | Raw PUT | Unlimited |
+| [DataNodes](https://datanodes.to) | **Required** (API_TOKEN) | Two-step multipart POST | 3 GB free / unlimited premium |
+| [GoFile](https://gofile.io) | Optional (API_TOKEN) | Multipart POST | Unlimited |
+| [VikingFile](https://vikingfile.com) | Optional (API_TOKEN) | Streaming multipart | Unlimited |
+| [ZincDrive](https://zincdrive.com) | **Required** (API_TOKEN) | S3 presigned PUT | 10 GB |
 
 ## Installation
 
@@ -81,19 +81,19 @@ Only needed for services that require authentication (currently DataNodes and Zi
 
 ```bash
 # DataNodes (required)
-manyup config set datanodes API_KEY your_api_key_here
+manyup config set datanodes API_TOKEN your_api_key_here
 
 # ZincDrive (required)
-manyup config set zincdrive API_KEY your_api_key_here
+manyup config set zincdrive API_TOKEN your_api_key_here
 
 # GoFile (optional — works anonymous, but token ties uploads to your account)
-manyup config set gofile TOKEN your_gofile_token
+manyup config set gofile API_TOKEN your_gofile_token
 
 # BuzzHeavier (optional — works anonymous)
-manyup config set buzzheavier ACCOUNT_ID your_account_id
+manyup config set buzzheavier API_TOKEN your_account_id
 
 # VikingFile (optional — works anonymous)
-manyup config set vikingfile USER_HASH your_user_hash
+manyup config set vikingfile API_TOKEN your_user_hash
 ```
 
 ### Upload multiple files
@@ -130,13 +130,13 @@ Config is stored in a JSON file at:
 Credentials can also be set via environment variables instead of the config file:
 
 ```bash
-export MANYUP_DATANODES_API_KEY=your_key
-export MANYUP_ZINCDRIVE_API_KEY=your_key
-export MANYUP_GOFILE_TOKEN=your_token
+export MANYUP_DATANODES_API_TOKEN=your_key
+export MANYUP_ZINCDRIVE_API_TOKEN=your_key
+export MANYUP_GOFILE_API_TOKEN=your_token
 manyup upload myfile.zip
 ```
 
-Format: `MANYUP_<SERVICE>_<KEY>`
+Format: `MANYUP_<SERVICE>_API_TOKEN`
 
 ## Architecture
 
