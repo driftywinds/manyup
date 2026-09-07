@@ -20,18 +20,33 @@ jobs:
           - goos: windows
             goarch: amd64
             suffix: .exe
+            name: manyup-windows-amd64
+            portable: false
+          - goos: windows
+            goarch: amd64
+            suffix: .exe
+            name: manyup-windows-amd64-portable
+            portable: true
           - goos: linux
             goarch: amd64
             suffix: ""
+            name: manyup-linux-amd64
+            portable: false
           - goos: linux
             goarch: arm64
             suffix: ""
+            name: manyup-linux-arm64
+            portable: false
           - goos: darwin
             goarch: amd64
             suffix: ""
+            name: manyup-darwin-amd64
+            portable: false
           - goos: darwin
             goarch: arm64
             suffix: ""
+            name: manyup-darwin-arm64
+            portable: false
 
     steps:
       - name: Checkout
@@ -48,15 +63,24 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          output="manyup-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
-          go build -trimpath -ldflags="-s -w -X main.version=${{ inputs.tag }}" -o "$output" .
-          echo "BINARY=$output" >> "$GITHUB_ENV"
+          ldflags="-s -w -X main.version=${{ inputs.tag }}"
+          if [ "${{ matrix.portable }}" = "true" ]; then
+            ldflags="$ldflags -X github.com/driftywinds/manyup/internal/config.IsPortable=true"
+          fi
+          go build -trimpath -ldflags="$ldflags" -o "${{ matrix.name }}${{ matrix.suffix }}" .
+          echo "BINARY=${{ matrix.name }}${{ matrix.suffix }}" >> "$GITHUB_ENV"
+
+      - name: Zip portable build
+        if: matrix.portable
+        run: zip -j "${{ matrix.name }}.zip" "${{ matrix.name }}${{ matrix.suffix }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: manyup-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: ${{ env.BINARY }}
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.name }}${{ matrix.suffix }}
+            ${{ matrix.portable && format('{0}.zip', matrix.name) || '' }}
 
   release:
     needs: build

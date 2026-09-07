@@ -40,10 +40,19 @@ func DefaultConfig() *AppConfig {
 	}
 }
 
-// ConfigDir returns the platform-appropriate config directory.
-// On Windows: %APPDATA%/manyup
-// On others:  ~/.config/manyup
+// IsPortable is set via ldflags at build time to enable portable mode.
+// When true, config lives next to the executable instead of %APPDATA%.
+var IsPortable = "false"
+
+// ConfigDir returns the config directory.
+// In portable mode: <executable_dir>/config
+// Otherwise:        %APPDATA%/manyup (Windows) or ~/.config/manyup (others)
 func ConfigDir() string {
+	if IsPortable == "true" {
+		if execPath, err := os.Executable(); err == nil {
+			return filepath.Join(filepath.Dir(execPath), "config")
+		}
+	}
 	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
 		return filepath.Join(dir, "manyup")
 	}
