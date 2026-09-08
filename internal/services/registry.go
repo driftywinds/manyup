@@ -20,6 +20,8 @@ func All() *plugin.Registry {
 	RegisterBuzzHeavier(r)
 	RegisterDataNodes(r)
 	RegisterGoFile(r)
+	RegisterZeroXZero(r)
+	RegisterPixelDrain(r)
 	RegisterVikingFile(r)
 	RegisterZincDrive(r)
 	return r

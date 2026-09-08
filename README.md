@@ -6,7 +6,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 ## Features
 
-- **Multi-service uploads** — BuzzHeavier, DataNodes, GoFile, VikingFile, and ZincDrive out of the box
+- **Multi-service uploads** — BuzzHeavier, DataNodes, GoFile, PixelDrain, VikingFile, ZincDrive, and 0x0.st out of the box
 - **Parallel or sequential** — upload to all selected services at once, or one at a time
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
 - **Plugin architecture** — add new hosting services by implementing a single Go interface
@@ -19,9 +19,11 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 | Service | Auth | Upload Method | Max Size |
 |---|---|---|---|
+| [0x0.st](https://0x0.st) | None | Multipart POST | 512 MB |
 | [BuzzHeavier](https://buzzheavier.com) | Optional (API_TOKEN) | Raw PUT | Unlimited |
 | [DataNodes](https://datanodes.to) | **Required** (API_TOKEN) | Two-step multipart POST | 3 GB free / unlimited premium |
 | [GoFile](https://gofile.io) | Optional (API_TOKEN) | Multipart POST | Unlimited |
+| [PixelDrain](https://pixeldrain.com) | Optional (API_TOKEN) | Raw PUT | Plan-dependent |
 | [VikingFile](https://vikingfile.com) | Optional (API_TOKEN) | Streaming multipart | Unlimited |
 | [ZincDrive](https://zincdrive.com) | **Required** (API_TOKEN) | S3 presigned PUT | 10 GB |
 
@@ -89,6 +91,9 @@ manyup config set zincdrive API_TOKEN your_api_key_here
 # GoFile (optional — works anonymous, but token ties uploads to your account)
 manyup config set gofile API_TOKEN your_gofile_token
 
+# PixelDrain (optional — anonymous works, but token increases limits)
+manyup config set pixeldrain API_TOKEN your_pixeldrain_api_key
+
 # BuzzHeavier (optional — works anonymous)
 manyup config set buzzheavier API_TOKEN your_account_id
 
@@ -133,6 +138,7 @@ Credentials can also be set via environment variables instead of the config file
 export MANYUP_DATANODES_API_TOKEN=your_key
 export MANYUP_ZINCDRIVE_API_TOKEN=your_key
 export MANYUP_GOFILE_API_TOKEN=your_token
+export MANYUP_PIXELDRAIN_API_TOKEN=your_token
 manyup upload myfile.zip
 ```
 
@@ -158,6 +164,8 @@ manyup/
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
 │       ├── datanodes.go             # DataNodes plugin (two-step multipart API)
 │       ├── gofile.go                # GoFile plugin (multipart upload)
+│       ├── 0x0.go                   # 0x0.st plugin (multipart POST upload)
+│       ├── pixeldrain.go            # PixelDrain plugin (PUT upload)
 │       ├── vikingfile.go            # VikingFile plugin (legacy + chunked fallback)
 │       └── zincdrive.go             # ZincDrive plugin (S3 presigned upload)
 ```
