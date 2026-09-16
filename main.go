@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -15,8 +16,8 @@ import (
 
 	"github.com/driftywinds/manyup/internal/config"
 	"github.com/driftywinds/manyup/internal/services"
-	"github.com/driftywinds/manyup/internal/uploader"
 	"github.com/driftywinds/manyup/internal/update"
+	"github.com/driftywinds/manyup/internal/uploader"
 )
 
 var version = "0.1.0"
@@ -67,6 +68,7 @@ COMMANDS:
   config show                 Show current configuration
   config mode <parallel|sequential>    Set upload mode
   config select <service>     Toggle a service on/off
+  config retry <max> [seconds]  Retries per service + base backoff delay
   version                     Print version
   update, -U, --update       Check for and apply updates
 
@@ -214,6 +216,34 @@ func cmdConfig() {
 		}
 		fmt.Printf("✓ Upload mode set to %s\n", mode)
 
+	case "retry":
+		if len(args) < 2 {
+			maxRetries, delay := cfg.RetrySettings()
+			fmt.Printf("Current: %d retries per service, %ds base delay\n", maxRetries, delay)
+			fmt.Fprintln(os.Stderr, "Usage: manyup config retry <max-retries> [base-delay-seconds]")
+			os.Exit(1)
+		}
+		maxRetries, err := strconv.Atoi(args[1])
+		if err != nil || maxRetries < 0 {
+			fmt.Fprintln(os.Stderr, "Max retries must be a non-negative number (0 disables retries)")
+			os.Exit(1)
+		}
+		_, delay := cfg.RetrySettings()
+		if len(args) >= 3 {
+			d, convErr := strconv.Atoi(args[2])
+			if convErr != nil || d < 0 {
+				fmt.Fprintln(os.Stderr, "Base delay must be a non-negative number of seconds")
+				os.Exit(1)
+			}
+			delay = d
+		}
+		cfg.SetRetrySettings(maxRetries, delay)
+		if err := cfg.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✓ Retries set: %d per service, %ds base delay (exponential backoff)\n", maxRetries, delay)
+
 	case "select":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: manyup config select <service>")
@@ -258,6 +288,7 @@ Commands:
   show                          Show current configuration
   mode <parallel|sequential>    Set upload mode
   select <service>              Toggle a service on/off
+  retry <max> [seconds]         Retries per service + base backoff delay (0 disables)
 `)
 }
 
@@ -299,6 +330,8 @@ func cmdConfigMenu() {
 
 		fmt.Println()
 		fmt.Printf("  Upload mode: %s\n", cfg.UploadMode)
+		maxRetries, delay := cfg.RetrySettings()
+		fmt.Printf("  Retries: %d per service (%ds base delay)\n", maxRetries, delay)
 		fmt.Println()
 		fmt.Println("  Commands:")
 		fmt.Println("    <number>  Toggle service")
@@ -359,7 +392,9 @@ func cmdConfigMenu() {
 }
 
 func printConfig(cfg *config.AppConfig) {
+	maxRetries, delay := cfg.RetrySettings()
 	fmt.Printf("Upload mode: %s\n", cfg.UploadMode)
+	fmt.Printf("Retries: %d per service (base delay %ds)\n", maxRetries, delay)
 	fmt.Printf("Selected services: %s\n", strings.Join(cfg.SelectedServices, ", "))
 	fmt.Println("\nService credentials:")
 	for name, sc := range cfg.Services {
@@ -374,12 +409,13 @@ func printConfig(cfg *config.AppConfig) {
 // ── Progress bar display ────────────────────────────────────────────────
 
 type serviceBar struct {
-	name    string
-	bytes   int64
-	total   int64
-	percent float64
-	speed   float64
-	status  string // "", "done", "error"
+	name     string
+	bytes    int64
+	total    int64
+	percent  float64
+	speed    float64
+	status   string // "", "retry", "done", "error"
+	retryMsg string // shown while waiting to retry
 }
 
 type progressDisplay struct {
@@ -421,10 +457,26 @@ func (d *progressDisplay) handle(p uploader.Progress) {
 			return
 		}
 		bar := d.bars[idx]
+		bar.status = "" // clears a previous retry note
+		bar.retryMsg = ""
 		bar.bytes = p.Bytes
 		bar.total = p.Total
 		bar.percent = p.Percent
 		bar.speed = p.Speed
+		d.renderAt(bar, idx)
+
+	case "retry":
+		idx, ok := d.barIndex[p.Service]
+		if !ok {
+			return
+		}
+		bar := d.bars[idx]
+		bar.status = "retry"
+		bar.bytes = 0
+		bar.total = p.Total
+		bar.percent = 0
+		bar.speed = 0
+		bar.retryMsg = fmt.Sprintf("retry %d/%d · %s", p.Attempt, p.MaxAttempts, p.Message)
 		d.renderAt(bar, idx)
 
 	case "done":
@@ -477,6 +529,9 @@ func formatBarLine(bar *serviceBar) string {
 	}
 	if bar.status == "error" {
 		return fmt.Sprintf("  %-12s ✗ failed", bar.name)
+	}
+	if bar.status == "retry" {
+		return fmt.Sprintf("  %-12s ↻ %s", bar.name, bar.retryMsg)
 	}
 
 	const barWidth = 20

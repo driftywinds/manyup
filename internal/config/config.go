@@ -13,8 +13,17 @@ import (
 type UploadMode string
 
 const (
-	ModeParallel  UploadMode = "parallel"
+	ModeParallel   UploadMode = "parallel"
 	ModeSequential UploadMode = "sequential"
+)
+
+const (
+	// DefaultMaxRetries is the number of re-attempts per service after the
+	// initial upload fails, when the config does not override it.
+	DefaultMaxRetries = 2
+	// DefaultRetryDelaySeconds is the base wait between attempts. Each
+	// subsequent retry doubles it (exponential backoff).
+	DefaultRetryDelaySeconds = 2
 )
 
 // ServiceConfig holds credentials and optional overrides for one service.
@@ -26,9 +35,16 @@ type ServiceConfig struct {
 
 // AppConfig is the top-level persisted config.
 type AppConfig struct {
-	SelectedServices []string                   `json:"selected_services"`
-	UploadMode       UploadMode                 `json:"upload_mode"`
-	Services         map[string]*ServiceConfig  `json:"services"`
+	SelectedServices []string   `json:"selected_services"`
+	UploadMode       UploadMode `json:"upload_mode"`
+	// MaxRetries is the number of retries per service after a failed
+	// upload attempt. Pointer so absent keys fall back to
+	// DefaultMaxRetries while an explicit 0 disables retries.
+	MaxRetries *int `json:"max_retries,omitempty"`
+	// RetryDelaySeconds is the base backoff delay between attempts.
+	// Pointer so absent keys fall back to DefaultRetryDelaySeconds.
+	RetryDelaySeconds *int                      `json:"retry_delay_seconds,omitempty"`
+	Services          map[string]*ServiceConfig `json:"services"`
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -127,4 +143,32 @@ func (c *AppConfig) ToggleService(service string) {
 		}
 	}
 	c.SelectedServices = append(c.SelectedServices, service)
+}
+
+// RetrySettings returns the configured retry behaviour: how many times a
+// failed service upload is re-attempted (after the first try) and the base
+// delay in seconds between attempts. Unset values fall back to defaults.
+func (c *AppConfig) RetrySettings() (maxRetries, delaySeconds int) {
+	maxRetries, delaySeconds = DefaultMaxRetries, DefaultRetryDelaySeconds
+	if c.MaxRetries != nil {
+		maxRetries = *c.MaxRetries
+	}
+	if c.RetryDelaySeconds != nil {
+		delaySeconds = *c.RetryDelaySeconds
+	}
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	if delaySeconds < 0 {
+		delaySeconds = 0
+	}
+	return maxRetries, delaySeconds
+}
+
+// SetRetrySettings persists the retry settings; a maxRetries of 0 disables
+// retries entirely.
+func (c *AppConfig) SetRetrySettings(maxRetries, delaySeconds int) {
+	mr, ds := maxRetries, delaySeconds
+	c.MaxRetries = &mr
+	c.RetryDelaySeconds = &ds
 }

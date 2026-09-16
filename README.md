@@ -11,6 +11,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
 - **Plugin architecture** — add new hosting services by implementing a single Go interface
 - **Streaming uploads** — files are streamed, never buffered entirely in memory. Uploads multi-gigabyte files with minimal RAM usage
+- **Automatic retries** — transient failures (dropped connections, timeouts, rate limits, 5xx responses) are retried per service with exponential backoff, while permanent errors fail fast
 - **Resilient** — missing credentials skip a service with a warning instead of blocking everything
 - **Cross-platform** — builds for Windows, Linux, and macOS (amd64 + arm64)
 - **Zero dependencies** — single static binary, no runtime requirements
@@ -59,6 +60,7 @@ manyup <command> [options]
 | `manyup config show` | Show current configuration |
 | `manyup config mode <parallel\|sequential>` | Set upload mode |
 | `manyup config select <service>` | Toggle a service on/off |
+| `manyup config retry <max> [seconds]` | Set retries per service and base backoff delay |
 | `manyup version` | Print version |
 | `manyup update` / `manyup -U` | Check for and apply updates |
 | `manyup help` | Show usage |
@@ -143,6 +145,23 @@ manyup upload myfile.zip
 ```
 
 Format: `MANYUP_<SERVICE>_API_TOKEN`
+
+### Upload retries
+
+When a service upload fails with a transient error — dropped/reset connections, timeouts, unexpected EOFs, rate limiting (429), or server-side errors (5xx) — manyup automatically retries that service with exponential backoff (jittered so parallel services don't reconnect in lockstep). Permanent failures such as bad requests, auth errors, or 403/404 responses fail immediately without wasting time.
+
+```bash
+# 3 total attempts per service (default: 2 retries, 2s base delay)
+manyup config retry 2
+
+# 5 retries with a 5s base delay: waits ~5s, 10s, 20s, 30s, 30s
+manyup config retry 5 5
+
+# Disable retries entirely
+manyup config retry 0
+```
+
+Each wait doubles per attempt and is capped at 30 seconds. Retries can also be set in `config.json` via `max_retries` and `retry_delay_seconds`.
 
 ## Architecture
 

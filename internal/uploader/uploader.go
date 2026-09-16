@@ -1,6 +1,7 @@
 // Package uploader orchestrates uploads across multiple services in either
 // parallel or sequential mode. It handles credential validation, context
-// cancellation, progress reporting, and result aggregation.
+// cancellation, progress reporting, transient-failure retries, and result
+// aggregation.
 package uploader
 
 import (
@@ -17,18 +18,21 @@ import (
 
 // Progress is emitted on the Progress channel during uploads.
 type Progress struct {
-	Service  string
-	State    string // "starting", "uploading", "done", "error"
-	Percent  float64
-	Bytes    int64
-	Total    int64
-	Speed    float64 // bytes per second (smoothed)
+	Service     string
+	State       string // "starting", "uploading", "retry", "done", "error"
+	Percent     float64
+	Bytes       int64
+	Total       int64
+	Speed       float64 // bytes per second (smoothed)
+	Attempt     int     // attempt number that just failed (State "retry")
+	MaxAttempts int     // total attempts that will be made (State "retry")
+	Message     string  // compact failure reason (State "retry")
 }
 
 // MultiResult aggregates results from all services for a single file.
 type MultiResult struct {
-	Filename string
-	Results  []*plugin.UploadResult
+	Filename  string
+	Results   []*plugin.UploadResult
 	TotalTime float64
 }
 
@@ -147,7 +151,8 @@ func (m *UploadManager) uploadSequential(
 	}
 }
 
-// doUpload performs a single upload to one service.
+// doUpload uploads to one service, retrying transient failures with
+// exponential backoff. It emits exactly one terminal progress event.
 func (m *UploadManager) doUpload(
 	ctx context.Context,
 	svc plugin.Uploader,
@@ -161,19 +166,92 @@ func (m *UploadManager) doUpload(
 	}
 
 	filename := filepath.Base(filePath)
+	maxRetries, baseDelay := m.retrySettings()
+	totalAttempts := maxRetries + 1
 
-	// Re-open the file for each upload (parallel needs independent readers).
-	f, err := os.Open(filePath)
-	if err != nil {
-		return &plugin.UploadResult{
+	start := time.Now()
+	var res *plugin.UploadResult
+
+	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		if ctx.Err() != nil {
+			break
+		}
+
+		var err error
+		res, err = m.attemptUpload(ctx, svc, filename, filePath, fileSize, progressCh)
+		if err == nil {
+			break
+		}
+
+		// Merge the failure into the result.
+		if res == nil {
+			res = &plugin.UploadResult{}
+		}
+		res.Service = svc.Name()
+		res.Filename = filename
+		res.Error = err
+
+		// Retry transient failures; give up on permanent ones.
+		if attempt >= totalAttempts || ctx.Err() != nil || !isRetryableError(err) {
+			if attempt > 1 {
+				res.Error = fmt.Errorf("%w (after %d attempts)", err, attempt)
+			}
+			break
+		}
+
+		wait := retryBackoff(attempt, baseDelay)
+		progressCh <- Progress{
+			Service:     svc.Name(),
+			State:       "retry",
+			Attempt:     attempt,
+			MaxAttempts: totalAttempts,
+			Message:     shortError(err),
+		}
+		if !sleepContext(ctx, wait) {
+			break
+		}
+	}
+
+	if res == nil {
+		// Cancelled before the first attempt or during a backoff wait.
+		res = &plugin.UploadResult{
 			Service:  svc.Name(),
 			Filename: filename,
-			Error:    fmt.Errorf("re-opening file: %w", err),
+			Error:    fmt.Errorf("%s: aborted: %w", svc.Name(), ctx.Err()),
 		}
+	}
+	res.Duration = time.Since(start).Seconds()
+
+	state := "done"
+	if res.Error != nil {
+		state = "error"
+	}
+
+	progressCh <- Progress{
+		Service: svc.Name(),
+		State:   state,
+	}
+
+	return res
+}
+
+// attemptUpload performs exactly one upload attempt for a service.
+// It opens a fresh file handle so every attempt (and every parallel
+// service) streams from offset 0.
+func (m *UploadManager) attemptUpload(
+	ctx context.Context,
+	svc plugin.Uploader,
+	filename string,
+	filePath string,
+	fileSize int64,
+	progressCh chan<- Progress,
+) (*plugin.UploadResult, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("re-opening file: %w", err)
 	}
 	defer f.Close()
 
-	start := time.Now()
 	creds := m.getCredentials(svc.Name())
 	cfg := m.getServiceConfig(svc.Name())
 
@@ -185,30 +263,14 @@ func (m *UploadManager) doUpload(
 	// Stop progress tracking; waits for final emit so the terminal
 	// event below is guaranteed to arrive after the last progress tick.
 	pr.Close()
-	if err != nil {
-		if res == nil {
-			res = &plugin.UploadResult{}
-		}
-		res.Error = err
-		res.Service = svc.Name()
-		res.Filename = filename
-	}
 
-	if res != nil {
-		res.Duration = time.Since(start).Seconds()
-	}
+	return res, err
+}
 
-	state := "done"
-	if res != nil && res.Error != nil {
-		state = "error"
-	}
-
-	progressCh <- Progress{
-		Service: svc.Name(),
-		State:   state,
-	}
-
-	return res
+// retrySettings returns the configured retry behaviour.
+func (m *UploadManager) retrySettings() (maxRetries int, baseDelay time.Duration) {
+	retries, delaySecs := m.cfg.RetrySettings()
+	return retries, time.Duration(delaySecs) * time.Second
 }
 
 // resolveServices returns the list of Uploader instances for the selected services.
