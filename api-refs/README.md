@@ -13,9 +13,11 @@ client-rendered, sign-in gated, or have gone offline.
 | 0x0.st | `0x0.go` | none | `multipart/form-data` POST | 512 MiB | [0x0.md](0x0.md) |
 | BuzzHeavier | `buzzheavier.go` | optional account id | raw `PUT` | no documented limit | [buzzheavier.md](buzzheavier.md) |
 | DataNodes | `datanodes.go` | **required** key | resolve server + multipart POST | 3 GB free / unlimited premium | [datanodes.md](datanodes.md) |
+| FuckingFast | `fuckingfast.go` | optional account id | raw `PUT` | no documented limit | [fuckingfast.md](fuckingfast.md) |
 | GoFile | `gofile.go` | optional token | `multipart/form-data` POST | no per-file cap; free tier allows 10,000 stored files | [gofile.md](gofile.md) |
 | Mocha | `mocha.go` | **required** key | multipart presigned `PUT` | 20 GiB (per account) | [mocha.md](mocha.md) |
 | PixelDrain | `pixeldrain.go` | **required** key | raw `PUT` | plan-dependent | [pixeldrain.md](pixeldrain.md) |
+| storage.to | `storageto.go` | optional token | init → presigned `PUT` → confirm | 25 GB anonymous/free; 100 GB paid | [storageto.md](storageto.md) |
 | VikingFile | `vikingfile.go` | optional hash | chunked presigned `PUT` | unlimited | [vikingfile.md](vikingfile.md) |
 | ZincDrive | `zincdrive.go` | **required** key | S3 presigned `PUT` + confirm | 4 GB single-part; 10 GB multipart | [zincdrive.md](zincdrive.md) |
 

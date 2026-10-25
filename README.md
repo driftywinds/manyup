@@ -6,7 +6,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 ## Features
 
-- **Multi-service uploads** — BuzzHeavier, DataNodes, GoFile, Mocha, PixelDrain, VikingFile, ZincDrive, and 0x0.st out of the box
+- **Multi-service uploads** — BuzzHeavier, DataNodes, FuckingFast, GoFile, Mocha, PixelDrain, storage.to, VikingFile, ZincDrive, and 0x0.st out of the box
 - **Parallel or sequential** — upload to all selected services at once, or one at a time
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
 - **Plugin architecture** — add new hosting services by implementing a single Go interface
@@ -25,9 +25,11 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 | [0x0.st](https://0x0.st) | None | Multipart POST | 512 MB |
 | [BuzzHeavier](https://buzzheavier.com) | Optional (API_TOKEN) | Raw PUT | Unlimited |
 | [DataNodes](https://datanodes.to) | **Required** (API_TOKEN) | Two-step multipart POST | 3 GB free / unlimited premium |
+| [FuckingFast](https://fuckingfast.net) | Optional (API_TOKEN) | Raw PUT | Unlimited |
 | [GoFile](https://gofile.io) | Optional (API_TOKEN) | Multipart POST | Unlimited |
 | [Mocha](https://mocha.my) | **Required** (API_TOKEN) | Multipart presigned PUT | 20 GiB per file |
 | [PixelDrain](https://pixeldrain.com) | **Required** (API_TOKEN) | Raw PUT | Plan-dependent |
+| [storage.to](https://storage.to) | Optional (API_TOKEN) | init → presigned PUT → confirm | 25 GB free / 100 GB paid |
 | [VikingFile](https://vikingfile.com) | Optional (API_TOKEN) | Streaming multipart | Unlimited |
 | [ZincDrive](https://zincdrive.com) | **Required** (API_TOKEN) | S3 presigned PUT | 10 GB |
 
@@ -215,8 +217,14 @@ manyup config set pixeldrain your_pixeldrain_api_key
 # BuzzHeavier (optional — works anonymous)
 manyup config set buzzheavier your_account_id
 
+# FuckingFast (optional — works anonymous, account id ties uploads to your account)
+manyup config set fuckingfast your_account_id
+
 # VikingFile (optional — works anonymous)
 manyup config set vikingfile your_user_hash
+
+# storage.to (optional — anonymous uploads expire in 3 days; a token removes the caps)
+manyup config set storageto your_api_token
 
 # Explicit form, for any other credential key
 manyup config set gofile API_TOKEN your_gofile_token
@@ -387,10 +395,12 @@ manyup/
 │       ├── verify.go                # Shared credential-check helpers
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
 │       ├── datanodes.go             # DataNodes plugin (two-step multipart API)
+│       ├── fuckingfast.go           # FuckingFast plugin (PUT upload)
 │       ├── gofile.go                # GoFile plugin (multipart upload)
 │       ├── mocha.go                 # Mocha plugin (multipart presigned + share link)
 │       ├── 0x0.go                   # 0x0.st plugin (multipart POST upload)
 │       ├── pixeldrain.go            # PixelDrain plugin (PUT upload)
+│       ├── storageto.go             # storage.to plugin (presigned PUT, multipart)
 │       ├── vikingfile.go            # VikingFile plugin (legacy + chunked fallback)
 │       └── zincdrive.go             # ZincDrive plugin (S3 presigned upload)
 ```

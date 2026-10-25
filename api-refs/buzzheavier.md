@@ -65,22 +65,36 @@ Parameters:
 | `locationId` | query | optional | storage location id |
 | `note` | query | optional | base64-encoded text, max 500 chars |
 
-### Response
+### Response — HTTP `201`
 
-The vendor docs do not publish a response schema. The shape below is what the
-implementation parses (observed, not vendor-documented):
+Observed against the live service on 2026-10-25 (the vendor docs publish no schema):
 
 ```jsonc
 {
-  "code": <integer>,            // status; value not documented by the vendor
+  "code": 201,
   "data": {
-    "id": "abc123",
-    "name": "myfile.zip",
-    "size": 12345678,
-    "locationId": "..."
+    "id": "r16jbgpwdvb9",
+    "name": "manyup-note-probe-1792913870049.txt",
+    "isDirectory": false,
+    "locationId": "5urmb0o0baxx",
+    "size": 23,
+    "expiry": "2026-10-29T07:37:52.692605Z",
+    "views": 0,
+    "downloads": 0,
+    "sha256": "dd756659a8196c6d5e315ea785cab666e3a2bcc489171d9ba280eef3e7ef65c2",
+    "md5": "ad5f5b5caf88fde1fefa8c06ac16cc36",
+    "note": "hello from manyup",
+    "createdAt": "2026-10-25T07:37:52.692605Z"
   }
 }
 ```
+
+Verified behaviours:
+
+- `code` mirrors the HTTP status (`201`), so it is not a zero-based result code.
+- `?note=` is accepted, stored, and echoed back **decoded** in `data.note`.
+- `locationId` is assigned by the server when not requested.
+- Anonymous uploads expire — the `expiry` above was four days out.
 
 The public download URL is built from `data.id`:
 
@@ -113,13 +127,14 @@ description `BuzzHeavier fast file hosting (PUT upload)`.
 - **Destination**: `cfg["parentId"]` becomes
   `PUT https://w.buzzheavier.com/{parentId}/{filename}`; otherwise a non-empty
   `cfg["locationId"]` appends `?locationId=`. If both are set, `parentId` wins.
+- **Note**: `cfg["note"]` is sent as `?note={base64(text)}`; the API echoes it back decoded
+  in `data.note`.
 - **Headers**: `Content-Type: application/octet-stream`; `Content-Length` is set from the
   supplied size when `size > 0`; `Authorization: Bearer {creds["API_TOKEN"]}` is added only
   when the token is non-empty.
-- **Response handling**: unmarshals into `{code, data{id,name,size,locationId}}`, requires a
-  non-nil `data`, and returns `https://buzzheavier.com/{data.id}`. The reported size is
-  `data.size` (server-side), not the local file size.
-- **`note`**: never sent — there is no config key for it.
+- **Response handling**: unmarshals into `{code, data{id,name,size,locationId,note}}`,
+  requires a non-nil `data`, and returns `https://buzzheavier.com/{data.id}`. The reported
+  size is `data.size` (server-side), not the local file size.
 - **Credentials**: `API_TOKEN`, optional (`RequiredCredentials()` returns `nil`; anonymous
   uploads work). No credential means no `Authorization` header.
 - **`VerifyCredentials`**: `GET https://buzzheavier.com/api/account` with
@@ -137,13 +152,13 @@ description `BuzzHeavier fast file hosting (PUT upload)`.
 
 Maintainer notes — where the vendor docs and the plugin do not line up:
 
-- Vendor documents a `?note={base64}` upload variant; the plugin has no way to send it.
+- **`note`**: *resolved* — the plugin now sends `cfg["note"]` as `?note={base64}`.
 - Vendor calls the bearer value `YOUR_ACCOUNT_ID`; the plugin stores it under the credential
   key `API_TOKEN` (same value, different name).
-- The `{code, data{...}}` upload response is not in the vendor docs; it comes only from the
-  plugin's parser, so treat it as unverified against the vendor.
+- The `{code, data{...}}` upload response is not in the vendor docs; the shape recorded above
+  was observed live on 2026-10-25.
 - Vendor caps `{name}` at 500 chars; the plugin does not validate filename length.
 - Vendor documents `/api/locations` and the `/api/fs` file-manager endpoints (create/rename/
   move/delete, notes); the plugin uses only the PUT upload and `/api/account`.
-- Upload success is decided by the presence of `data`, not by HTTP status; a 2xx or non-2xx
-  with a `data` object would both be accepted.
+- Upload success is decided by the presence of `data`, not by HTTP status; a non-2xx
+  response is rejected first, so this only affects a 2xx that carries no `data`.

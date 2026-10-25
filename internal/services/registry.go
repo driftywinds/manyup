@@ -19,10 +19,12 @@ func All() *plugin.Registry {
 	// we register explicitly here for clarity and testability.
 	RegisterBuzzHeavier(r)
 	RegisterDataNodes(r)
+	RegisterFuckingFast(r)
 	RegisterGoFile(r)
 	RegisterMocha(r)
 	RegisterZeroXZero(r)
 	RegisterPixelDrain(r)
+	RegisterStorageTo(r)
 	RegisterVikingFile(r)
 	RegisterZincDrive(r)
 	return r

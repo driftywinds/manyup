@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,12 +17,20 @@ import (
 )
 
 const (
-	bhUploadBase   = "https://w.buzzheavier.com"
-	bhAccountURL   = "https://buzzheavier.com/api/account"
-	bhAPITimeout   = 300 * time.Second // 5 min for large files
+	bhAccountURL = "https://buzzheavier.com/api/account"
+	bhAPITimeout = 300 * time.Second // 5 min for large files
 )
 
+// bhUploadBase is a variable so tests can point the client at a local server.
+var bhUploadBase = "https://w.buzzheavier.com"
+
 // BuzzHeavier uploads files via raw PUT to w.buzzheavier.com/{filename}.
+//
+// Optional settings, taken from the service Options map:
+//
+//	parentId   upload into a directory: /{parentId}/{filename}
+//	locationId store in a specific location: ?locationId=...
+//	note       text shown under the download link (base64-encoded on the wire)
 type BuzzHeavier struct{}
 
 func RegisterBuzzHeavier(r *plugin.Registry) {
@@ -29,10 +38,10 @@ func RegisterBuzzHeavier(r *plugin.Registry) {
 }
 
 func (b *BuzzHeavier) Name() string                  { return "buzzheavier" }
-func (b *BuzzHeavier) DisplayName() string            { return "BuzzHeavier" }
-func (b *BuzzHeavier) Description() string             { return "BuzzHeavier fast file hosting (PUT upload)" }
-func (b *BuzzHeavier) RequiredCredentials() []string   { return nil } // anonymous works
-func (b *BuzzHeavier) SupportsLargeUpload() bool       { return true }
+func (b *BuzzHeavier) DisplayName() string           { return "BuzzHeavier" }
+func (b *BuzzHeavier) Description() string           { return "BuzzHeavier fast file hosting (PUT upload)" }
+func (b *BuzzHeavier) RequiredCredentials() []string { return nil } // anonymous works
+func (b *BuzzHeavier) SupportsLargeUpload() bool     { return true }
 
 // VerifyCredentials checks an account token against the account endpoint, which
 // answers 401 {"code":401,"error":"Unauthorized"} for an unknown token.
@@ -51,8 +60,8 @@ func (b *BuzzHeavier) VerifyCredentials(ctx context.Context, creds plugin.Creden
 
 // bhResponse is the BuzzHeavier API response envelope.
 type bhResponse struct {
-	Code int          `json:"code"`
-	Data *bhFileData  `json:"data,omitempty"`
+	Code int         `json:"code"`
+	Data *bhFileData `json:"data,omitempty"`
 }
 
 // bhFileData holds the file metadata returned after upload.
@@ -61,6 +70,7 @@ type bhFileData struct {
 	Name       string `json:"name"`
 	Size       int64  `json:"size"`
 	LocationID string `json:"locationId"`
+	Note       string `json:"note"`
 }
 
 func (b *BuzzHeavier) Upload(
@@ -71,14 +81,30 @@ func (b *BuzzHeavier) Upload(
 	creds plugin.Credentials,
 	cfg plugin.Config,
 ) (*plugin.UploadResult, error) {
-	// Build the upload URL: https://w.buzzheavier.com/{name}
-	// Optionally append ?parentId=... or ?locationId=...
-	uploadURL := bhUploadBase + "/" + url.PathEscape(filepath.Base(filename))
+	// Build the upload URL: https://w.buzzheavier.com/{name}, optionally with a
+	// parent directory in the path and locationId / note as query parameters.
+	name := url.PathEscape(filepath.Base(filename))
+	parentID := optionValue(cfg, "parentId")
 
-	if parentID, ok := cfg["parentId"]; ok && parentID != "" {
-		uploadURL = bhUploadBase + "/" + url.PathEscape(parentID) + "/" + url.PathEscape(filepath.Base(filename))
-	} else if locationID, ok := cfg["locationId"]; ok && locationID != "" {
-		uploadURL += "?locationId=" + url.QueryEscape(locationID)
+	uploadURL := bhUploadBase + "/" + name
+	if parentID != "" {
+		uploadURL = bhUploadBase + "/" + url.PathEscape(parentID) + "/" + name
+	}
+
+	query := url.Values{}
+	// A directory upload supersedes an explicit location: the directory already
+	// determines where the file is stored.
+	if parentID == "" {
+		if locationID := optionValue(cfg, "locationId"); locationID != "" {
+			query.Set("locationId", locationID)
+		}
+	}
+	// The note travels base64-encoded and is echoed back decoded.
+	if note := optionValue(cfg, "note"); note != "" {
+		query.Set("note", base64.StdEncoding.EncodeToString([]byte(note)))
+	}
+	if len(query) > 0 {
+		uploadURL += "?" + query.Encode()
 	}
 
 	// Create PUT request with streaming body.

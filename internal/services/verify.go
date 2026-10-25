@@ -75,3 +75,13 @@ func describeBody(body []byte) string {
 	}
 	return text
 }
+
+// optionValue reads a trimmed service option, tolerating a nil config. It is
+// shared by the services that expose optional upload settings (parentId,
+// locationId, note).
+func optionValue(cfg plugin.Config, key string) string {
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg[key])
+}

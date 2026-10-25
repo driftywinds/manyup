@@ -37,8 +37,8 @@ const (
 	// mochaRelayPartSize is the fallback chunk size for the deprecated relay.
 	mochaRelayPartSize = 50 << 20
 
-	// mochaAbortTimeout bounds the best-effort cleanup of a failed upload.
-	mochaAbortTimeout = 10 * time.Second
+	// abortTimeout bounds the best-effort cleanup of a failed upload.
+	abortTimeout = 10 * time.Second
 )
 
 // Mocha uploads files to mocha.my, a hosted file service with an API-key
@@ -532,7 +532,7 @@ func (m *Mocha) createShare(
 // It runs on its own timeout because the parent context is usually already
 // cancelled by the time this is reached.
 func (m *Mocha) abortUpload(init *mochaInitResponse, dest, apiKey string) {
-	ctx, cancel := context.WithTimeout(context.Background(), mochaAbortTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), abortTimeout)
 	defer cancel()
 
 	payload := map[string]any{
