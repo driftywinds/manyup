@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strings"
 
 	"github.com/driftywinds/manyup/internal/httpclient"
 	"github.com/driftywinds/manyup/internal/plugin"
@@ -118,6 +119,37 @@ func (d *DataNodes) getUploadServer(ctx context.Context, apiKey string) (*dnServ
 	}
 
 	return &srv, nil
+}
+
+// VerifyCredentials resolves the API key to an upload session. DataNodes answers
+// HTTP 200 with {"msg":"Invalid key","status":400} for a bad key, so the body has
+// to be inspected, not just the status line.
+func (d *DataNodes) VerifyCredentials(ctx context.Context, creds plugin.Credentials, cfg plugin.Config) error {
+	apiKey := strings.TrimSpace(creds["API_TOKEN"])
+	if apiKey == "" {
+		return fmt.Errorf("datanodes: %w: API_TOKEN is empty", plugin.ErrCredentialRejected)
+	}
+
+	status, body, err := authGet(ctx, dnUploadServerURL+"?key="+url.QueryEscape(apiKey), "", "")
+	if err != nil {
+		return fmt.Errorf("datanodes: could not verify: %w", err)
+	}
+	if status != http.StatusOK {
+		return authCheckOutcome("datanodes", status, body)
+	}
+
+	var srv dnServerResponse
+	if err := json.Unmarshal(body, &srv); err != nil {
+		return fmt.Errorf("datanodes: could not verify: unexpected response: %s", describeBody(body))
+	}
+	if srv.SessID == "" || srv.Result == "" {
+		reason := srv.Msg
+		if reason == "" {
+			reason = describeBody(body)
+		}
+		return fmt.Errorf("datanodes: %w: %s", plugin.ErrCredentialRejected, reason)
+	}
+	return nil
 }
 
 // putFile streams the file to the upload server as multipart/form-data and

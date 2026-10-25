@@ -1,0 +1,568 @@
+API Documentation
+
+Integrate Gofile's storage and content delivery into your applications with the REST API.
+
+The API is in beta — endpoints may evolve, check this page regularly.
+Getting started
+Uploading
+Files & folders
+Direct links
+Accounts
+Getting started
+Authentication
+
+Every API request is authenticated with an account token — yours is below, and on your profile page. Three equivalent ways to send it:
+Where	How	Applies to
+Authorization 	Authorization: Bearer YOUR_API_TOKEN 	Every request — recommended.
+token 	?token=YOUR_API_TOKEN 	GET requests only.
+token 	"token": "YOUR_API_TOKEN" in the JSON body 	Non-GET requests only.
+Your API token · fluffybob@cocaine.ninja
+
+Token of the account currently active on this device — switch accounts from the sidebar to use a different one.
+The token authenticates as the account itself — anyone holding it has full access. Keep it server-side: never embed it in public client-side code or commit it to a repository.
+Endpoints badged
+Premium require a Premium account. Everything else — uploading, creating folders, updating and deleting content — works with any account, including guests.
+Requests & responses
+
+All endpoints live under https://api.gofile.io (uploads excepted — see Uploading), speak JSON in and out, and are CORS-enabled, so browser-based integrations work too.
+
+Every response is wrapped in the same envelope:
+Success
+
+{
+  "status": "ok",
+  "data": { }
+}
+
+Error
+
+{
+  "status": "error-notPremium"
+}
+
+Always branch on the status field, not the HTTP code alone — a few endpoints historically answer HTTP 200 with an error status.
+Common error statuses
+Status	HTTP	Meaning
+error-token 	401 	No token provided, or the token was rejected.
+error-accountId 	403 	The requested account id does not match the token's account.
+error-notPremium 	401 	The endpoint requires a Premium account.
+error-rateLimit 	429 	Rate limit exceeded — back off and retry later.
+error-limits 	403 	Account quota exceeded (storage or content count).
+error-notFound 	404 	Unknown content — also returned to non-owners for recycled content.
+error-owner / error-notOwner 	401 	The content belongs to another account.
+error-field 	400 	A parameter failed validation — the status names it (error-contentsId, error-tags, …).
+Conventions
+
+    All timestamps are Unix seconds (e.g. 1754512800).
+    Content ids are UUIDs. Folders and files additionally carry a share code — 8 characters on newly created content, 6 on legacy public folders, both accepted indefinitely. GET /contents/{contentId} accepts either form; mutations require the UUID. A code grants no extra access: private content stays owner-only.
+    Folder listings paginate with page / pageSize; totals come back in a metadata object next to data.
+    On accounts with the recycle bin enabled, deletions are recoverable. The bin endpoints are deliberately left out of this reference while the feature is in beta.
+
+Rate limits
+
+Rate limits are enforced per endpoint, both per IP address and per account. Exceeded limits answer 429 with error-rateLimit — back off and retry.
+
+For security reasons, the exact values are not publicly disclosed. Normal API usage never comes close to them.
+Repeatedly exceeding rate limits may result in automatic IP bans.
+
+Need higher limits for a real use case? Contact us to discuss custom solutions.
+Account structure
+
+Every account owns a permanent root folder; all files and folders live somewhere under it:
+Account
+Root folder
+Files & subfolders
+
+The root folder cannot be deleted, moved or expired. Its UUID is the rootFolder field of the account details endpoint — start there to walk the tree.
+Uploading
+
+Uploads do not go to api.gofile.io: they are handled by the upload fleet, which routes each file to the best storage server.
+POST
+https://upload.gofile.io/uploadfile
+
+Upload a file. With no parameters at all, a guest account is created on the fly, a new public folder is generated at its root, and the file lands in it — the response carries everything needed to keep using both.
+Uploading without a token creates a guest account: the response then includes a guestToken. Reuse it (and the returned parentFolder) in subsequent requests to keep uploading into the same account and folder.
+Free accounts are capped at 10,000 stored contents — uploads past the cap fail with error-limits. Premium limits scale with the plan.
+Parameters Content-Type: multipart/form-data
+Parameter 	Type 	  	Description
+file 	file 	required 	The file to upload.
+folderId 	string 	optional 	UUID of the destination folder. Omit to create a new public folder at the account root.
+token 	string 	optional 	Account token. May also be sent as an Authorization: Bearer header instead — without either, a guest account is created.
+Regional endpoints
+
+The closest region is picked automatically. To pin a region, use its hostname instead (on the website, the same pinning lives in the profile preferences):
+upload.gofile.io
+Automatic (closest region)
+upload-eu-par.gofile.io
+Europe (Paris)
+upload-na-phx.gofile.io
+North America (Phoenix)
+upload-na-nyc.gofile.io
+North America (New York City)
+upload-ap-sgp.gofile.io
+Asia Pacific (Singapore)
+upload-ap-hkg.gofile.io
+Asia Pacific (Hong Kong)
+upload-ap-tyo.gofile.io
+Asia Pacific (Tokyo)
+upload-ap-syd.gofile.io
+Asia Pacific (Sydney)
+upload-sa-sao.gofile.io
+South America (São Paulo)
+Request
+
+curl -X POST https://upload.gofile.io/uploadfile \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -F "file=@report.pdf" \
+  -F "folderId=9f8e7d6c-5b4a-3928-1716-151413121110"
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "id": "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f",
+    "type": "file",
+    "name": "report.pdf",
+    "parentFolder": "9f8e7d6c-5b4a-3928-1716-151413121110",
+    "parentFolderCode": "x7k2p9Qm",
+    "downloadPage": "https://gofile.io/d/x7k2p9Qm",
+    "code": "Qp9w8eR7",
+    "size": 2481621,
+    "md5": "0f8adc1149b1a2c3d4e5f60718293a4b",
+    "mimetype": "application/pdf",
+    "createTime": 1754512800,
+    "modTime": 1754512800,
+    "servers": ["store-1"]
+  }
+}
+
+Files & folders
+
+Every file and folder lives under the account's root folder. Mutations take UUIDs only; the read endpoint also resolves share codes.
+POST
+https://api.gofile.io/contents/createFolder
+
+Create a folder inside a parent folder. The new folder inherits access (public, password, expiry) from its parent; change it afterwards with the update endpoint.
+Parameters Content-Type: application/json
+Parameter 	Type 	  	Description
+parentFolderId 	string 	required 	UUID of the parent folder — the account's root folder UUID for a top-level folder.
+folderName 	string 	optional 	Display name. Omit to auto-generate a unique name.
+public 	boolean 	optional 	Shareable by link. Omit to inherit the parent's setting. Every folder gets an 8-character share code at creation, returned as code — the short link is reachable while the folder is public.
+Request
+
+curl -X POST https://api.gofile.io/contents/createFolder \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"parentFolderId": "9f8e7d6c-5b4a-3928-1716-151413121110", "folderName": "Invoices", "public": true}'
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "id": "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d",
+    "type": "folder",
+    "name": "Invoices",
+    "parentFolder": "9f8e7d6c-5b4a-3928-1716-151413121110",
+    "code": "k41xz7Qm",
+    "createTime": 1754512800,
+    "modTime": 1754512800
+  }
+}
+
+GET
+https://api.gofile.io/contents/{contentId}
+Premium
+
+Read a folder — its metadata plus its children — or a single file's metadata. contentId accepts a content UUID or its share code — 8 characters on newly created folders and files, 6 on legacy public folders. A file returns its own payload, without children.
+Direct API access to listings is Premium-only: other tiers receive error-notPremium.
+Parameters Query parameters
+Parameter 	Type 	  	Description
+contentId path 	string 	required 	Folder or file UUID, or its share code (8 characters on new content; 6-character legacy codes keep working).
+password 	string 	optional 	SHA-256 hash of the folder password — only for password-protected folders.
+page 	integer 	optional 	Page number, starting at 1. Combine with pageSize.
+pageSize 	integer 	optional 	Items per page. Pagination info is returned next to data in a metadata object.
+sortField 	string 	optional 	createTime (default), name, size, downloads or mimetype.
+sortDirection 	integer 	optional 	1 ascending, -1 descending (default).
+contentFilter 	string 	optional 	Case-insensitive substring filter on child names and tags.
+maxdepth 	integer 	optional 	Nested children depth, 1–16 (default 1).
+Request
+
+curl "https://api.gofile.io/contents/x7k2p9Qm?page=1&pageSize=100" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "id": "9f8e7d6c-5b4a-3928-1716-151413121110",
+    "type": "folder",
+    "name": "Invoices",
+    "code": "x7k2p9",
+    "public": true,
+    "isOwner": true,
+    "childrenCount": 1,
+    "children": {
+      "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f": {
+        "id": "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f",
+        "type": "file",
+        "name": "report.pdf",
+        "size": 2481621,
+        "md5": "0f8adc1149b1a2c3d4e5f60718293a4b",
+        "mimetype": "application/pdf",
+        "createTime": 1754512800,
+        "servers": ["store-1"],
+        "serverSelected": "store-1",
+        "link": "https://store-1.gofile.io/download/web/d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/report.pdf"
+      }
+    }
+  },
+  "metadata": { "page": 1, "pageSize": 100, "totalCount": 1, "totalPages": 1, "hasNextPage": false }
+}
+
+PUT
+https://api.gofile.io/contents/{contentId}/update
+
+Update one attribute of a file or folder per call.
+Parameters Content-Type: application/json
+Parameter 	Type 	  	Description
+contentId path 	string 	required 	Content UUID (share codes are not accepted by mutations).
+attribute 	string 	required 	The attribute to modify — see the table below.
+attributeValue 	mixed 	required 	The new value; the expected format depends on the attribute. For removable attributes, an empty value deletes them.
+deleteAfterExpiry 	boolean 	optional 	Only with expiry: Premium folder owners may explicitly opt into permanent recursive deletion. Defaults to false when omitted. Guest/standard content is deleted at expiration regardless.
+Attributes
+Attribute	Applies to	Value format
+name 	files & folders 	New content name (max 255 characters).
+description 	folders 	Text shown on the download page (markdown supported), max 2,000 characters. Empty removes it.
+tags 	files & folders 	Comma-separated tags — letters, digits, - and _, 25 characters each. Empty removes all tags.
+public 	folders 	true / false. Making a folder public returns its share code (assigning one first if the folder predates universal share codes).
+password 	folders 	4–100 characters; empty removes it. Clients conventionally store the SHA-256 hex of the plaintext, which is what readers then send as the password parameter.
+expiry 	folders 	Expiration date as a Unix timestamp; empty removes it and clears deletion consent. Premium: visitor access expires, content is kept unless deleteAfterExpiry is true. Guest/standard: permanently deletes the folder and all descendants, without the recycle bin. Membership is checked at cleanup time. Rejected on the root folder (error-rootFolder).
+modTime 	files & folders 	Modification time as a Unix timestamp.
+Request
+
+curl -X PUT https://api.gofile.io/contents/1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d/update \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"attribute": "tags", "attributeValue": "invoices,2026"}'
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "id": "1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d",
+    "type": "folder",
+    "name": "Invoices",
+    "createTime": 1754512800,
+    "modTime": 1754599200
+  }
+}
+
+DELETE
+https://api.gofile.io/contents
+
+Delete files and/or folders. Deleting a folder removes everything inside it, recursively.
+If the account has its recycle bin enabled, deletions land there first (recoverable) instead of being erased immediately.
+Otherwise deletion is permanent and cannot be undone. Only your own content can be deleted (error-owner otherwise); the root folder and the recycle bin are protected (error-protectedFolder).
+Parameters Content-Type: application/json
+Parameter 	Type 	  	Description
+contentsId 	string 	required 	Comma-separated list of content UUIDs to delete.
+Request
+
+curl -X DELETE https://api.gofile.io/contents \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"contentsId": "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f,1a2b3c4d-5e6f-4a5b-8c9d-0e1f2a3b4c5d"}'
+
+Response — trimmed
+
+{ "status": "ok", "data": {} }
+
+POST
+https://api.gofile.io/contents/copy
+Premium
+
+Copy files and/or folders into a destination folder of your account. The copies are independent new content with their own UUIDs; the originals are untouched.
+Parameters Content-Type: application/json
+Parameter 	Type 	  	Description
+contentsId 	string 	required 	Comma-separated list of content UUIDs to copy.
+folderId 	string 	required 	UUID of the destination folder.
+password 	string 	optional 	SHA-256 hash of the password, when copying password-protected content.
+Request
+
+curl -X POST https://api.gofile.io/contents/copy \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"contentsId": "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f", "folderId": "9f8e7d6c-5b4a-3928-1716-151413121110"}'
+
+Response — trimmed
+
+{ "status": "ok", "data": {} }
+
+PUT
+https://api.gofile.io/contents/move
+Premium
+
+Move files and/or folders into another folder of your account. All attributes and permissions are preserved — only the location changes.
+Moving a folder moves its whole tree with it. Both the moved content and the destination must belong to your account.
+Parameters Content-Type: application/json
+Parameter 	Type 	  	Description
+contentsId 	string 	required 	Comma-separated list of content UUIDs to move.
+folderId 	string 	required 	UUID of the destination folder.
+Request
+
+curl -X PUT https://api.gofile.io/contents/move \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"contentsId": "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f", "folderId": "9f8e7d6c-5b4a-3928-1716-151413121110"}'
+
+Response — trimmed
+
+{ "status": "ok", "data": {} }
+
+POST
+https://api.gofile.io/contents/import
+Premium
+
+Save content shared with you into your own account: the items are copied into your root folder. The UUIDs come from the shared folder's listing.
+Password-protected content requires its password. When importing a folder, children you are not allowed to read may be skipped instead of failing the whole import.
+Parameters Content-Type: application/json
+Parameter 	Type 	  	Description
+contentsId 	string 	required 	Comma-separated list of content UUIDs to import.
+password 	string 	optional 	SHA-256 hash of the password protecting the source content.
+Request
+
+curl -X POST https://api.gofile.io/contents/import \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"contentsId": "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f"}'
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f": { "status": "ok", "data": { "id": "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b" } }
+  }
+}
+
+GET
+https://api.gofile.io/contents/search
+Premium
+
+Search a folder recursively by name or tags. Matches are case-insensitive substrings (doc matches document.pdf). The response is an object keyed by content UUID.
+Parameters Query parameters
+Parameter 	Type 	  	Description
+contentId 	string 	required 	UUID or share code of the folder to search in.
+searchedString 	string 	required 	Text to match against content names and tags.
+password 	string 	optional 	SHA-256 hash of the folder password, when protected.
+createTimeFrom 	integer 	optional 	Only content created at or after this Unix timestamp.
+createTimeTo 	integer 	optional 	Only content created at or before this Unix timestamp.
+Request
+
+curl "https://api.gofile.io/contents/search?contentId=x7k2p9&searchedString=invoice" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f": {
+      "id": "d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f",
+      "type": "file",
+      "name": "invoice-2026-07.pdf",
+      "size": 2481621,
+      "createTime": 1754512800
+    }
+  }
+}
+
+Direct links
+
+Direct links download content straight from the storage servers, bypassing the download page — for files the raw file, for folders a ZIP archive generated on the fly. A Premium feature.
+POST
+https://api.gofile.io/contents/{contentId}/directlinks
+Premium
+
+Create a direct link for a file or folder. Access can be restricted with an expiry, an IP allowlist, domain rules, or HTTP basic auth — combined freely.
+A content can carry up to 100 direct links, each with its own restrictions.
+Parameters Content-Type: application/json
+Parameter 	Type 	  	Description
+contentId path 	string 	required 	Content UUID (file or folder).
+expireTime 	integer 	optional 	Expiry as a Unix timestamp. Omit for a link that never expires.
+sourceIpsAllowed 	array 	optional 	IPv4 addresses allowed to use the link, e.g. ["203.0.113.10", "198.51.100.2"]. Omit to allow any IP.
+domainsAllowed 	array 	optional 	Only these referring domains may use the link, e.g. ["example.com"]. Omit to allow any origin.
+domainsBlocked 	array 	optional 	Referring domains that are explicitly blocked.
+auth 	array 	optional 	"user:password" pairs, e.g. ["jane:s3cret"] — the link then requires HTTP basic authentication.
+Request
+
+curl -X POST https://api.gofile.io/contents/d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/directlinks \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"expireTime": 1786051200, "sourceIpsAllowed": ["203.0.113.10"]}'
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "id": "7a8b9c0d-1e2f-4a3b-9c4d-5e6f7a8b9c0d",
+    "directLink": "https://store.gofile.io/download/direct/7a8b9c0d-1e2f-4a3b-9c4d-5e6f7a8b9c0d/report.pdf",
+    "expireTime": 1786051200,
+    "sourceIpsAllowed": ["203.0.113.10"],
+    "domainsAllowed": [],
+    "domainsBlocked": [],
+    "auth": []
+  }
+}
+
+PUT
+https://api.gofile.io/contents/{contentId}/directlinks/{directLinkId}
+Premium
+
+Update the restrictions of an existing direct link.
+PATCH semantics: a field you omit keeps its current value. To remove a restriction, send an empty array [] — or the never-expires sentinel 4102444800 for expireTime.
+Parameters Content-Type: application/json
+Parameter 	Type 	  	Description
+contentId path 	string 	required 	Content UUID the link belongs to.
+directLinkId path 	string 	required 	UUID of the direct link, returned at creation.
+expireTime 	integer 	optional 	New expiry as a Unix timestamp; 4102444800 means "never".
+sourceIpsAllowed 	array 	optional 	Replacement IPv4 allowlist.
+domainsAllowed 	array 	optional 	Replacement list of allowed referring domains.
+domainsBlocked 	array 	optional 	Replacement list of blocked referring domains.
+auth 	array 	optional 	Replacement "user:password" pairs.
+Request
+
+curl -X PUT https://api.gofile.io/contents/d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/directlinks/7a8b9c0d-1e2f-4a3b-9c4d-5e6f7a8b9c0d \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sourceIpsAllowed": [], "expireTime": 4102444800}'
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "id": "7a8b9c0d-1e2f-4a3b-9c4d-5e6f7a8b9c0d",
+    "directLink": "https://store.gofile.io/download/direct/7a8b9c0d-1e2f-4a3b-9c4d-5e6f7a8b9c0d/report.pdf",
+    "expireTime": 4102444800,
+    "sourceIpsAllowed": []
+  }
+}
+
+DELETE
+https://api.gofile.io/contents/{contentId}/directlinks/{directLinkId}
+Premium
+
+Permanently remove a direct link. Only the link is deleted — the content itself and its other direct links are unaffected.
+Parameters No body
+Parameter 	Type 	  	Description
+contentId path 	string 	required 	Content UUID the link belongs to.
+directLinkId path 	string 	required 	UUID of the direct link to delete.
+Request
+
+curl -X DELETE "https://api.gofile.io/contents/d4c5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f/directlinks/7a8b9c0d-1e2f-4a3b-9c4d-5e6f7a8b9c0d" \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+
+Response — trimmed
+
+{ "status": "ok", "data": {} }
+
+Accounts
+
+One account is enough for most integrations: create it once, store its token, and reuse it for every call.
+POST
+https://api.gofile.io/accounts
+
+Create an account — no token needed, this is the entry point. With an empty body a guest account is created and its token returned immediately. With an email, a standard account is created and a sign-in link (carrying the token) is sent to that address.
+Create one account and reuse its token — do not mint an account per upload. (Uploading without a token also auto-creates a guest account; see Uploading.)
+Parameters Content-Type: application/json
+Parameter 	Type 	  	Description
+email 	string 	optional 	Email address for a standard, recoverable account. Omit for an anonymous guest account.
+Request
+
+curl -X POST https://api.gofile.io/accounts \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "id": "8b9c0d1e-2f3a-4b4c-ad5e-6f7a8b9c0d1e",
+    "rootFolder": "9f8e7d6c-5b4a-3928-1716-151413121110",
+    "tier": "guest",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
+  }
+}
+
+GET
+https://api.gofile.io/accounts/getid
+
+Resolve the account behind the current token: its id, email and tier. Useful to check which account a token belongs to.
+Request
+
+curl https://api.gofile.io/accounts/getid \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "id": "8b9c0d1e-2f3a-4b4c-ad5e-6f7a8b9c0d1e",
+    "email": "jane@example.com",
+    "tier": "premium"
+  }
+}
+
+GET
+https://api.gofile.io/accounts/{accountId}
+
+Full account details: tier, root folder, plan limits and usage statistics. The requested id must belong to the token's account (error-accountId otherwise).
+Parameters Path parameter
+Parameter 	Type 	  	Description
+accountId path 	string 	required 	Account UUID, as returned by /accounts/getid.
+Request
+
+curl https://api.gofile.io/accounts/8b9c0d1e-2f3a-4b4c-ad5e-6f7a8b9c0d1e \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+
+Response — trimmed
+
+{
+  "status": "ok",
+  "data": {
+    "id": "8b9c0d1e-2f3a-4b4c-ad5e-6f7a8b9c0d1e",
+    "email": "jane@example.com",
+    "tier": "premium",
+    "premiumType": "subscription",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…",
+    "rootFolder": "9f8e7d6c-5b4a-3928-1716-151413121110",
+    "createTime": 1719856800,
+    "statsCurrent": { "storage": 2481621, "fileCount": 1, "folderCount": 2 }
+  }
+}
+
+POST
+https://api.gofile.io/accounts/{accountId}/resettoken
+
+Invalidate the current token and generate a new one. A sign-in link carrying the new token is emailed to the account's address.
+The old token stops working immediately — every app and device using it must be updated. Never reset a guest account's token: its synthetic address reaches no inbox, so the new token is lost and the account becomes unrecoverable.
+Parameters Path parameter
+Parameter 	Type 	  	Description
+accountId path 	string 	required 	Account UUID, as returned by /accounts/getid.
+Request
+
+curl -X POST https://api.gofile.io/accounts/8b9c0d1e-2f3a-4b4c-ad5e-6f7a8b9c0d1e/resettoken \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+
+Response — trimmed
+
+{ "status": "ok", "data": {} }
+

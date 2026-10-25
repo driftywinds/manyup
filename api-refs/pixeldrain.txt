@@ -1,0 +1,1332 @@
+
+API documentation
+
+Methods for using pixeldrain programmatically.
+Authentication
+
+All methods which create, modify or delete a resource require an API key. API keys can be obtained from your user account’s API keys page.
+
+To use the API key you need to enter it in the password field of HTTP Basic Access Authentication. The username field does not matter, it can be empty or anything else.
+
+Example usage in JavaScript:
+
+const resp = await fetch(
+	"https://pixeldrain.com/api/user/files",
+	headers: {
+		"Authorization": "Basic "+btoa(":"+api_key),
+		// The btoa function encodes the key to Base64
+	},
+)
+if(resp.status >= 400) {
+	throw new Error(await resp.json())
+}
+result = await resp.json()
+
+Some JSON responses include fields which end in “_href” (some people don’t know this, but “href” stands for “Hypertext Reference”, the more you know). These point to different places in the API, which you can retrieve with a GET request. The path is to be appended to the API URL, so “/file/someid/thumbnail” becomes “/api/file/someid/thumbnail”.
+
+The base URL for the API is “/api”, all paths below are relative to that URL.
+curl example
+
+To upload files to pixeldrain you will need an API key. Get an API key from the API keys page and enter it in the command. Replace the example API key here with your own:
+
+curl -T "file_name.txt" -u :5f45f184-64bb-4eaa-be19-4a5f0459db49 https://pixeldrain.com/api/file/
+Response format
+
+Every API endpoint which does not return raw file data responds with JSON. A JSON response always contains a success field. When a request fails (the HTTP status code is 400 or higher) the response also contains a value field with a machine-readable error code and a message field with a human-readable explanation of what went wrong:
+
+HTTP 404: Not Found
+{
+	"success": false,
+	"value": "not_found",
+	"message": "The entity you requested could not be found"
+}
+
+The message text can change between versions of the API, the value code is stable. Use value when handling errors programmatically.
+
+Some errors contain an extra object with additional information about the error, like which form field caused it:
+
+HTTP 400: Bad Request
+{
+	"success": false,
+	"value": "missing_field",
+	"message": "A required field was not sent with this request. See extra for more information",
+	"extra": {
+		"field": "name"
+	}
+}
+
+Multiple errors
+
+Endpoints which validate multiple form fields can return more than one error in a single response. In that case the value is multiple_errors and the response contains an errors array. Each element of the array is a normal error object as described above:
+
+HTTP 400: Bad Request
+{
+	"success": false,
+	"value": "multiple_errors",
+	"message": "This API endpoint can return multiple errors which need to be checked individually. See the errors array",
+	"errors": [
+		{
+			"success": false,
+			"value": "string_out_of_range",
+			"message": "A string parameter you passed was either too short or too long",
+			"extra": {
+				"field": "name",
+				"min_len": 1,
+				"max_len": 255,
+				"len": 300
+			}
+		},
+		{
+			"success": false,
+			"value": "missing_field",
+			"message": "A required field was not sent with this request. See extra for more information",
+			"extra": {
+				"field": "file"
+			}
+		}
+	]
+}
+
+The HTTP status of a multiple_errors response is 400, unless one of the contained errors is a server error, then it’s elevated to 500.
+Error codes
+
+These error codes can be returned by any API endpoint. Errors which only apply to a specific endpoint are documented with that endpoint.
+General errors
+Value 	HTTP status 	Description
+internal 	500 	Something went wrong on the server side, try again later
+api_not_implemented 	501 	This API does not exist yet
+not_found 	404 	The entity you requested could not be found
+invalid_endpoint 	404 	The API endpoint you requested does not exist, check the URL for errors
+resource_already_exists 	400 	The resource could not be created because it already exists
+websocket_endpoint 	400 	This is a websocket endpoint, pass the ‘Upgrade: websocket’ header to upgrade the connection
+ip_rate_limit_reached 	429 	Your IP address has reached a limit for this action, try again later
+network_error 	400 	An error occurred while transmitting the response
+read_only_mode_enabled 	503 	The server is in read-only mode, writing is temporarily disabled
+multiple_errors 	400 / 500 	Multiple errors occurred, see the errors array in the response
+Input validation errors
+
+These errors are returned when a request contains invalid input. Where possible the extra object contains a field key with the name of the offending form field.
+Value 	HTTP status 	Description
+missing_field 	400 	A required field was not sent with the request, see extra.field
+json_parse_failed 	422 	The JSON object in the request body could not be parsed
+base64_parse_failed 	422 	The base64 object in the request body could not be parsed
+bool_parse_failed 	422 	Failed to parse a boolean value, allowed values are ‘true’ and ‘false’
+integer_parse_failed 	422 	An integer parameter could not be parsed
+integer_out_of_range 	422 	An integer parameter was either too high or too low, see extra.min_val and extra.max_val
+string_out_of_range 	422 	A string parameter was either too short or too long, see extra.min_len and extra.max_len
+utf8_string_parse_failed 	422 	A string parameter contains invalid UTF-8 data
+time_parse_failed 	422 	A time parameter was not formatted correctly, time should be in RFC 3339 format
+enum_parse_failed 	422 	A string parameter did not contain an allowed value, see extra.allowed_values
+uuid_parse_failed 	422 	A UUID parameter was not formatted correctly
+hex_parse_failed 	422 	A hexadecimal parameter was not formatted correctly
+address_parse_failed 	422 	A network address parameter was not formatted correctly
+error_reading_input 	400 	The values you sent could not be read on the server side, try again
+incorrect_order_of_form_parts 	400 	This API requires form parameters to be ordered the way they are documented
+recpatcha_failed 	424 	The captcha response could not be verified
+invalid_email_address 	400 	The e-mail address entered is not valid
+field_contains_illegal_character 	400 	A string parameter contains a disallowed character, see extra.char and extra.char_position
+invalid_file_type 	400 	The file you submitted is not of the right type
+invalid_x509_keypair 	400 	Failed to parse the provided x509 keypair
+Authentication errors
+Value 	HTTP status 	Description
+authentication_required 	401 	This request requires an API key, see the Authentication chapter
+authentication_failed 	401 	The provided API key is invalid, has been revoked or has expired
+forbidden 	403 	You are not authorized to execute this request
+user_not_found 	404 	User with this name or e-mail address does not exist
+password_incorrect 	400 	The entered password is not correct for this user
+otp_incorrect 	400 	The entered one-time password is not correct for this user
+otp_required 	400 	A one-time password is required to log in to this account
+File upload errors
+Value 	HTTP status 	Description
+no_file 	422 	The file does not exist or is empty
+file_too_large 	413 	The file you tried to upload is larger than your plan allows
+writing 	500 	Something went wrong while writing the file to disk, the server may be out of storage space
+name_contains_illegal_character 	422 	The file name contains characters which are not allowed in file names, see extra.illegal_chars
+invalid_content_type 	400 	You sent multipart form data to the PUT endpoint, use the POST endpoint for form uploads
+ip_banned 	403 	This IP address has been banned from using pixeldrain for violating the content policy
+account_banned 	403 	This user account has been banned from using pixeldrain for violating the content policy
+user_out_of_space 	400 	Your account has run out of storage space, upgrade to a higher plan to continue uploading
+too_many_files 	400 	You have too many files on your account, delete some old files or switch to the filesystem
+File download errors
+Value 	HTTP status 	Description
+file_rate_limited_captcha_required 	403 	Hotlinking was detected for this file, a captcha is required to continue downloading. The captcha entry is available on the download page
+virus_detected_captcha_required 	403 	This file has been marked as malware, a captcha is required to download it. The captcha entry is available on the download page
+hotlink_detected 	403 	Hotlinking was detected for this download, hotlinking is only allowed on premium accounts
+ip_download_limited_captcha_required 	403 	Your IP address made too many download requests in the last 24 hours, wait or complete a captcha
+server_overload_captcha_required 	403 	The servers are under too much stress, free users are asked to complete a captcha before starting new downloads
+max_concurrent_downloads 	403 	You have reached the maximum number of open download connections for free accounts
+transfer_limit_exceeded 	403 	You have exceeded the transfer limit for free users, upgrade to a premium plan to continue downloading
+download_limit_exceeded 	403 	You have exceeded the download limit for free users, upgrade to a premium plan to continue downloading
+unavailable_for_legal_reasons 	451 	This file cannot be downloaded because it has received a takedown report, see extra.type for the report type
+invalid_referrer 	400 	The URL in the Referer header could not be parsed
+embed_not_allowed 	403 	Embedding this file is not allowed
+Account management errors
+Value 	HTTP status 	Description
+not_enough_credit_for_prepaid 	400 	To activate a prepaid subscription you need at least €1 on your account
+cannot_disable_patreon_sub 	400 	A Patreon subscription can only be disabled through Patreon itself
+File Methods
+
+POST/file
+
+Description
+
+Upload a file. I recommend that you use the PUT API instead of the POST API. It’s easier to use and the multipart encoding of the POST API can cause performance issues in certain environments.
+
+This API requires authentication with an API key. Anonymous uploading is not supported.
+Parameters
+Param 	Type 	Required 	Maximum Size 	Default 	Description
+name 	string 	false 	255 characters 	multipart file name 	Name of the file to upload
+file 	multipart file 	true 	Depends on user subscription 	none 	File to upload
+Returns
+
+HTTP 201: Created
+
+{
+	"success": true,
+	"id": "abc123" // ID of the newly uploaded file
+}
+
+Example error:
+
+HTTP 422: Unprocessable Entity
+
+{
+	"success": false,
+	"value": "no_file",
+	"message": "The file does not exist or is empty"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+authentication_required 	401 	No API key was provided, uploading requires an account
+no_file 	422 	The file does not exist or is empty
+file_too_large 	413 	The file is larger than your plan’s file size limit
+missing_field 	400 	The file has no name, see extra.field
+string_out_of_range 	422 	The file name is longer than 255 characters
+name_contains_illegal_character 	422 	The file name contains characters which are not allowed, see extra.illegal_chars
+error_reading_input 	400 	The upload was interrupted before it completed
+too_many_files 	400 	Your account holds more files than the per-account limit
+user_out_of_space 	400 	Your account has run out of storage space
+email_address_not_verified 	403 	Your account does not have a verified e-mail address yet
+ip_banned 	403 	Your IP address has been banned for violating the content policy
+account_banned 	403 	Your account has been banned for violating the content policy
+writing 	500 	Failed to write the file to disk, the server may be out of storage space
+internal 	500 	An internal server error occurred
+
+PUT/file/{name}
+
+Description
+
+Upload a file. The file should be sent as the raw request body, do not use multipart form encoding here. If you want to use form encoding use the POST API instead.
+
+This API requires authentication with an API key. Anonymous uploading is not supported.
+Parameters
+Param 	Type 	Required 	Location 	Maximum Size 	Default 	Description
+name 	string 	true 	URL 	255 characters 	none 	Name of the file to upload
+file 	file 	true 	request body 	Depends on user subscription 	none 	File to upload
+Returns
+
+On success the full file info is returned, this is the same structure as the GET /file/{id}/info response.
+
+HTTP 201: Created
+
+{
+	"success": true,
+	"id": "abc123", // ID of the newly uploaded file
+	"name": "file_name.txt",
+	"size": 123456,
+	... // Remaining file info fields, see GET /file/{id}/info
+}
+
+Example error:
+
+HTTP 413: Payload Too Large
+
+{
+	"success": false,
+	"value": "file_too_large",
+	"message": "The file you tried to upload is too large"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+authentication_required 	401 	No API key was provided, uploading requires an account
+invalid_content_type 	400 	You sent multipart form data, use the POST endpoint for form uploads
+file_too_large 	413 	The file is larger than your plan’s file size limit
+missing_field 	400 	The file has no name, see extra.field
+string_out_of_range 	422 	The file name is longer than 255 characters
+name_contains_illegal_character 	422 	The file name contains characters which are not allowed, see extra.illegal_chars
+error_reading_input 	400 	The upload was interrupted before it completed
+too_many_files 	400 	Your account holds more files than the per-account limit
+user_out_of_space 	400 	Your account has run out of storage space
+email_address_not_verified 	403 	Your account does not have a verified e-mail address yet
+ip_banned 	403 	Your IP address has been banned for violating the content policy
+account_banned 	403 	Your account has been banned for violating the content policy
+writing 	500 	Failed to write the file to disk, the server may be out of storage space
+internal 	500 	An internal server error occurred
+
+GET/file/{id}
+
+Description
+
+Returns the full file associated with the ID. Supports byte range requests.
+
+You can also download multiple files at once by separating the IDs with commas in the URL. The files will then be served as a zip archive.
+
+When ‘?download’ is added to the URL the server will send an attachment header instead of inline rendering, which causes the browser to show a ‘Save File’ dialog.
+
+Warning: If a file is using too much bandwidth it can be rate limited. The rate limit will be enabled if a file has three times more downloads than views. The owner of a file can always download it. When a file is rate limited the user will need to fill out a captcha in order to continue downloading the file. The captcha will only appear on the file viewer page (pixeldrain.com/u/{id}). Rate limiting has been added to prevent the spread of viruses and to stop hotlinking. Hotlinking is only allowed when either the uploader or the downloader has a premium subscription.
+
+Free downloads are also subject to limits on the number of downloads, the amount of data transferred and the number of simultaneous connections per IP address. When one of these limits is hit the download fails with one of the errors listed below. Most of these restrictions can be lifted by completing a captcha on the download page, or by getting a premium subscription.
+Parameters
+Param 	Required 	Location 	Description
+id 	true 	URL 	ID of the file to request
+download 	false 	URL 	Sends attachment header instead of inline
+recaptcha_response 	false 	URL 	Captcha response token, lifts captcha-based download restrictions
+Returns
+
+HTTP 200: OK
+
+Requested file data
+
+Example error:
+
+HTTP 403: Forbidden
+
+{
+	"success": false,
+	"value": "file_rate_limited_captcha_required",
+	"message": "We have detected the use of hotlinking for this file. Hotlinking is only supported when either the uploader or the downloader has a paid subscription"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+not_found 	404 	The file does not exist. For multi-file requests extra.file contains the ID which was not found
+file_rate_limited_captcha_required 	403 	The file is rate limited, complete the captcha on the download page to continue
+virus_detected_captcha_required 	403 	The file has been marked as malware, complete the captcha on the download page to continue
+hotlink_detected 	403 	Hotlinking was detected, hotlinking is only allowed with a premium subscription
+ip_download_limited_captcha_required 	403 	Your IP address made too many download requests in the last 24 hours, wait or complete a captcha
+max_concurrent_downloads 	403 	Too many simultaneous download connections from your IP address, wait for other downloads to finish
+transfer_limit_exceeded 	403 	You have exceeded the free transfer limit, upgrade to premium to continue downloading
+download_limit_exceeded 	403 	You have exceeded the free download limit, upgrade to premium to continue downloading
+unavailable_for_legal_reasons 	451 	The file received a takedown report and cannot be downloaded, see extra.type
+recpatcha_failed 	424 	The submitted captcha response token could not be verified
+internal 	500 	An internal server error occurred
+
+GET/file/{id}/info
+
+Description
+
+Returns information about one or more files. You can also put a comma separated list of file IDs in the URL and it will return an array of file info, instead of a single object. There’s a limit of 100 files per request. Files which do not exist are left out of the array, the request only fails with not_found if none of the requested files exist.
+Parameters
+Param 	Required 	Location 	Description
+id 	true 	URL 	ID of the file
+Returns
+
+HTTP 200: OK
+
+{
+	"success": true,
+	"id": "1234abcd",
+	"name": "screenshot.png",
+	// Size of the file in bytes
+	"size": 5694837,
+	// Number of unique file views, views are counted once per IP address
+	"views": 1234,
+	// Total bandwidth usage of the file
+	"bandwidth_used": 1234567890,
+	// Premium bandwidth usage, from users with a Pro subscription or bandwidth sharing
+	"bandwidth_used_paid": 1234567890,
+	// Unique downloads per IP address
+	"downloads": 1234,
+	"date_upload": "2020-02-04T18:34:05.706801Z",
+	"date_last_view": "2020-02-04T18:34:05.706801Z",
+	"mime_type": "image/png",
+	// Link to a thumbnail of this file
+	"thumbnail_href": "/file/1234abcd/thumbnail",
+	// SHA256 sum of the file, encoded in hexadecimal
+	"hash_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	// When the delete_after_date or delete_after_downloads options are used
+	// these fields show when the file will be deleted
+	"delete_after_date": "0001-01-01T00:00:00Z",
+	"delete_after_downloads": 0,
+	// Availability indicates whether downloading is restricted. It's empty if
+	// the file can be downloaded normally, else it contains one of the file
+	// download error codes and availability_message contains an explanation
+	"availability": "",
+	"availability_message": "",
+	// If the file received an abuse report these fields contain the type of
+	// report and the name of the reporting organization
+	"abuse_type": "",
+	"abuse_reporter_name": "",
+	// If the current logged in user can edit or download the file
+	"can_edit": true,
+	"can_download": true,
+	// Whether advertisements are shown on the download page of this file
+	"show_ads": false,
+	// Whether the video player is available for this file
+	"allow_video_player": true,
+	// Download speed limit in bytes per second, 0 means no limit
+	"download_speed_limit": 0
+}
+
+Possible errors
+Value 	HTTP status 	Description
+not_found 	404 	None of the requested files exist
+string_out_of_range 	422 	More than 100 file IDs were requested at once
+internal 	500 	An internal server error occurred
+
+GET/file/{id}/thumbnail?width=x&height=x
+
+Description
+
+Returns a PNG thumbnail image representing the file. The thumbnail image will be 256x256 px by default. You can specify the width and height with parameters in the URL. The width and height parameters need to be a multiple of 16 between 16 and 256. So the allowed values are 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240 and 256. If a thumbnail cannot be generated for the file you will get an image representing the type of the file instead.
+Parameters
+Param 	Required 	Location 	Description
+id 	true 	URL 	ID of the file to get a thumbnail for
+width 	false 	URL 	Width of the thumbnail image
+height 	false 	URL 	Height of the thumbnail image
+Returns
+
+A PNG image if a thumbnail can be generated. If a thumbnail cannot be generated you will get an icon representing the mime type of the file instead.
+Possible errors
+Value 	HTTP status 	Description
+not_found 	404 	The file does not exist
+invalid_thumbnail_size 	400 	The width or height is not a multiple of 16 between 16 and 256
+internal 	500 	An internal server error occurred
+
+DELETE/file/{id}
+
+Description
+
+Deletes a file. Only works when the users owns the file.
+Parameters
+Param 	Required 	Location 	Description
+id 	true 	URL 	ID of the file to delete
+Returns
+
+HTTP 200: OK
+
+{
+	"success": true,
+	"value": "ok",
+	"message": "The requested action was successfully performed"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+not_found 	404 	The file does not exist
+forbidden 	403 	You are not logged in or this is not your file
+internal 	500 	An internal server error occurred
+
+List Methods
+
+POST/list
+
+Description
+
+Creates a list of files that can be viewed together on the file viewer page.
+Parameters
+
+POST body should be a JSON object, example below. A list can contain at most 10000 files. If you try to add more the request will fail.
+Example
+
+{
+	"title": "My beautiful photos", // Defaults to "Pixeldrain List"
+	"anonymous": false / true, // If true this list will not be linked to your user account. Defaults to "false"
+	"files": [ // Ordered array of files to add to the list
+		{
+			"id": "abc123"
+		},
+		{
+			"id": "123abc"
+		}
+	]
+}
+
+Returns
+
+HTTP 201: Created
+
+{
+	"success": true,
+	"id": "yay137" // ID of the newly created list
+}
+
+Example error:
+
+HTTP 422: Unprocessable Entity
+
+{
+	"success": false,
+	"value": "list_file_not_found",
+	"message": "File was not found in the database",
+	"extra": {
+		"file_not_found": "0h42No" // The file you tried to add with this ID does not exist
+	}
+}
+
+Possible errors
+Value 	HTTP status 	Description
+json_parse_failed 	422 	The JSON object in the request body could not be parsed
+list_file_not_found 	422 	One of the files in the list does not exist, see extra.file_not_found
+too_many_files 	413 	The list contains more than 10000 files
+title_too_long 	413 	The title of the list is longer than 300 characters
+cannot_create_empty_list 	422 	You cannot make a list with no files
+internal 	500 	An internal server error occurred
+
+GET/list/{id}
+
+Description
+
+Returns information about a file list and the files in it.
+Parameters
+Param 	Required 	Location 	Description
+id 	true 	URL 	ID of the list
+Returns
+
+The API will return some basic information about every file. Every file also has a “detail_href” field which contains a URL to the info API of the file. Follow that link to get more information about the file like size, checksum, mime type, etc. The address is relative to the API URL and should be appended to the end.
+
+HTTP 200: OK
+
+{
+	"success": true,
+	"id": "L8bhwx",
+	"title": "Rust in Peace",
+	"date_created": "2020-02-04T18:34:13.466276Z",
+	"file_count": 3,
+	// If the current logged in user can edit the list
+	"can_edit": false,
+	"files": [
+		// These structures are the same as the file info response, except for
+		// the detail_href and description fields
+		{
+			"detail_href": "/file/_SqVWi/info",
+			"description": "",
+			"success": true,
+			"id": "_SqVWi",
+			"name": "01 Holy Wars... The Punishment Due.mp3",
+			"size": 123456,
+			"date_upload": "2020-02-04T18:34:13.466276Z",
+			"date_last_view": "2020-02-04T18:34:13.466276Z",
+			"mime_type": "audio/mp3",
+			"views": 1,
+			"bandwidth_used": 1234567890,
+			"thumbnail_href": "/file/_SqVWi/thumbnail"
+		},
+		{
+			"detail_href": "/file/RKwgZb/info",
+			"description": "",
+			"success": true,
+			"id": "RKwgZb",
+			"name": "02 Hangar 18.mp3",
+			"size": 123456,
+			"date_upload": "2020-02-04T18:34:13.466276Z",
+			"date_last_view": "2020-02-04T18:34:13.466276Z",
+			"mime_type": "audio/mp3",
+			"views": 2,
+			"bandwidth_used": 1234567890,
+			"thumbnail_href": "/file/RKwgZb/thumbnail"
+		},
+		{
+			"detail_href": "/file/DRaL_e/info",
+			"description": "",
+			"success": true,
+			"id": "DRaL_e",
+			"name": "03 Take No Prisoners.mp3",
+			"size": 123456,
+			"date_upload": "2020-02-04T18:34:13.466276Z",
+			"date_last_view": "2020-02-04T18:34:13.466276Z",
+			"mime_type": "audio/mp3",
+			"views": 3,
+			"bandwidth_used": 1234567890,
+			"thumbnail_href": "/file/DRaL_e/thumbnail"
+		}
+	]
+}
+
+HTTP 404: Not Found
+
+{
+	"success": false,
+	"value": "not_found",
+	"message": "The entity you requested could not be found"
+}
+
+Filesystem Methods
+
+These methods are used to interact with the pixeldrain filesystem. The filesystem is available to accounts with a paid subscription.
+Paths
+
+Every filesystem endpoint works on a path, and every path starts with a bucket. There are two ways to address a bucket:
+
+    me is your own filesystem, this requires authentication with an API key. Example: /filesystem/me/documents/todo.txt
+    The 8 character ID of a shared directory or file. This is the same ID that’s at the end of a sharing link like https://pixeldrain.com/d/abcd1234. Example: /filesystem/abcd1234/photos/cat.jpg
+
+Special characters in path components need to be URL-encoded.
+
+The owner of a filesystem can always read and write. What other users are allowed to do is determined by the permissions configured on the shared directory with the update action documented below.
+Node objects
+
+Information about files and directories is returned as a ‘node’ object. This is what a node looks like:
+
+{
+	// Type is either "file" or "dir"
+	"type": "file",
+	"path": "/documents/todo.txt",
+	"name": "todo.txt",
+	"created": "2024-02-04T18:34:13.466276Z",
+	"modified": "2024-02-04T18:34:13.466276Z",
+	// Unix file mode in symbolic and octal form
+	"mode_string": "-rw-r--r--",
+	"mode_octal": "644",
+	// Username of the account which created the node
+	"created_by": "some_user",
+
+	// Only present on files
+	"file_size": 9757269,
+	"file_type": "text/plain",
+	"sha256_sum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+
+	// Only present if the node, or one of its parents, is shared. This is the
+	// ID which can be used to access the node without authentication
+	"id": "abcd1234",
+
+	// Only present if the node received an abuse report. Nodes with an abuse
+	// type cannot be downloaded
+	"abuse_type": "",
+	"abuse_report_time": "2024-02-04T18:34:13.466276Z",
+
+	// Branding properties configured with the update action, only present if
+	// branding is configured
+	"properties": {
+		"branding_enabled": "true",
+		"brand_header_image": "abcd1234"
+	},
+
+	// Sharing permissions, only visible to the owner of the filesystem
+	"link_permissions": {"owner": false, "read": true, "write": false, "delete": false},
+	"user_permissions": {"friendly_user": {"owner": false, "read": true, "write": true, "delete": false}},
+	"password_permissions": {"hunter2": {"owner": false, "read": true, "write": false, "delete": false}}
+}
+
+GET/filesystem/{path}
+
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+
+PUT/filesystem/{path}
+
+				
+				
+				
+				
+
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+
+POST/filesystem/{path}
+
+				
+				
+				
+
+				
+				
+				
+				
+
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+
+			
+			
+			
+
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+
+DELETE/filesystem/{path}
+
+			
+			
+			
+
+		
+		
+		
+		
+		
+		
+		
+
+User Methods
+
+These methods all require authentication with an API key, except for POST /user/login which is how you get an API key in the first place.
+
+Because authentication is required, every endpoint in this chapter can return the authentication_required (401), authentication_failed (401) and internal (500) errors. These are not repeated in the error listings below.
+
+POST/user/login
+
+Description
+
+Logs in to an account. On success a new session is created and the API key for the session is returned. Use this API key for all other user methods. The key is also set as a cookie named ‘pd_auth_key’, so browsers are logged in immediately.
+
+There are two ways to log in:
+
+    Password login: send the username and password fields. The username field accepts both a username and an e-mail address.
+    E-mail login: send only the username field and leave the password empty. A login link is e-mailed to the account, the response will be login_link_sent (HTTP 202). The link contains the link_login_user_id and link_login_id parameters, which are sent to this same endpoint to complete the login. When the username field contains an e-mail address the link is sent to that address, this also works with an address which is still waiting for verification and using the link verifies it. When it contains a username the link is sent to the first address on the account. This is how a lost password is recovered.
+
+Accounts with two-factor authentication enabled need two of these three proofs of identity, any combination will do:
+
+    A login link, sent by e-mail (link_login_user_id + link_login_id)
+    The account password (password)
+    A one-time password from the authenticator app (totp)
+
+When only one of them is sent the otp_required error is returned. This means an account can still be recovered when the authenticator app is lost, by requesting a login link and sending it together with the password. Accounts without two-factor authentication need only one of the three.
+
+Logins are rate limited per IP address, when logging in too often the ip_rate_limit_reached error is returned.
+Parameters
+Param 	Type 	Required 	Description
+username 	string 	true 	Username or e-mail address of the account
+password 	string 	for password login 	Password of the account, leave empty to receive a login link by e-mail. Can be combined with a login link as second factor
+totp 	string 	if 2FA is enabled 	Six digit time-based one-time password
+app_name 	string 	false 	Name of your application, will be shown on the API keys page. The name ‘website login’ is reserved and returns the app_name_reserved error
+redirect 	string 	false 	Path the user is sent to after using the e-mailed login link
+link_login_user_id 	UUID 	for link login 	User ID from the e-mailed login link
+link_login_id 	UUID 	for link login 	Single-use login ID from the e-mailed login link
+Returns
+
+HTTP 201: Created
+
+{
+	// The API key of the new session
+	"auth_key": "550e8400-e29b-41d4-a716-446655440000",
+	"creation_ip_address": "192.0.2.1",
+	"user_agent": "Mozilla/5.0 ...",
+	"app_name": "my_app",
+	"creation_time": "2024-02-04T18:34:13.466276Z",
+	"last_used_time": "2024-02-04T18:34:13.466276Z",
+	// The domains this API key can be used on
+	"valid_domains": ["pixeldrain.com"]
+}
+
+When only an e-mail address was entered:
+
+HTTP 202: Accepted
+
+{
+	"success": true,
+	"value": "login_link_sent",
+	"message": "Login link was sent to the user"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+user_not_found 	404 	No account exists with this username or e-mail address
+password_incorrect 	400 	The entered password is not correct for this account
+no_login_method_available 	400 	No password was entered and the account has no e-mail address to send a login link to
+otp_required 	400 	The account has two-factor authentication enabled, a second proof of identity is required
+otp_incorrect 	400 	The entered one-time password is not correct
+login_link_sent 	202 	Not an error, a login link was e-mailed to the user
+app_name_reserved 	400 	The requested app name is reserved for the pixeldrain website
+login_link_already_sent 	400 	The account already has an active login link, wait for it to expire
+invalid_login_link 	400 	The login link is not valid for this account, it may have expired
+invalid_email_address 	400 	A login link could not be sent because the e-mail address is invalid
+request_origin_invalid 	400 	The Origin header of the request does not match the pixeldrain domain names
+ip_rate_limit_reached 	429 	Too many login attempts from your IP address, try again later
+
+GET/user
+
+Description
+
+Returns information about the logged in user account.
+Returns
+
+HTTP 200: OK
+
+{
+	"id": "8e08a626-040e-417e-8713-a0f43737a235",
+	"username": "some_user",
+	// All verified e-mail addresses on the account. Account notifications are
+	// sent to all of them. An account can have at most 5 addresses
+	"email_addresses": ["user@example.com"],
+	// Address which is waiting for its verification link to be clicked
+	"email_address_pending": "",
+	// Accounts registered after 2026-09-01 need a verified e-mail address
+	// before they are allowed to upload files
+	"can_upload": true,
+	// Deprecated: use email_addresses instead. Contains the first address
+	"email": "user@example.com",
+	// Deprecated: use email_addresses instead
+	"email_verified": true,
+	// Whether two-factor authentication is enabled
+	"otp_enabled": false,
+	// The subscription plan of this account
+	"subscription": {
+		"id": "prepaid",
+		"name": "Prepaid",
+		"type": "prepaid",
+		"file_size_limit": 107374182400,
+		"file_expiry_days": 0,
+		"storage_space": -1,
+		"price_per_tb_storage": 4000000,
+		"price_per_tb_bandwidth": 1000000,
+		"monthly_transfer_cap": -1,
+		"file_viewer_branding": true,
+		"filesystem_access": true,
+		"filesystem_storage_limit": -1
+	},
+	"storage_space_used": 1234567890,
+	"filesystem_storage_used": 1234567890,
+	"file_count": 420,
+	"filesystem_node_count": 1337,
+	"is_admin": false,
+	// Prepaid balance in micro euros, 1000000 = €1
+	"balance_micro_eur": 12500000,
+	"hotlinking_enabled": true,
+	// Monthly transfer cap in bytes, 0 means no custom cap is configured
+	"monthly_transfer_cap": 0,
+	"monthly_transfer_used": 1234567890,
+	// File viewer customizations, see PUT /user/file_customization
+	"file_viewer_branding": null,
+	// Space separated list of domains which can embed your files
+	"file_embed_domains": "",
+	// Whether direct file links skip the file viewer page
+	"skip_file_viewer": false,
+	"affiliate_user_name": "",
+	"checkout_country": "NLD",
+	"checkout_name": "",
+	"checkout_provider": ""
+}
+
+PUT/user
+
+Description
+
+Updates account settings. Only the fields which are sent with the request are updated.
+Parameters
+Param 	Type 	Description
+username 	string 	New username of the account
+email 	string 	E-mail address to add to the account, up to a maximum of 5 addresses. A verification link is sent to the address, it’s only added to the account when the link is used. Sending an address which is already pending verification sends a new link
+password_new 	string 	New password of the account, between 5 and 50 characters. Only sessions which were created by logging in on the website can change the password
+subscription 	enum 	Activate a prepaid plan, can be ‘prepaid’ or ‘prepaid_lite’. Requires at least €1 of account credit
+hotlinking_enabled 	boolean 	Whether other people are allowed to use your account’s data transfer when downloading your files
+transfer_cap 	integer 	Custom monthly transfer cap in bytes, cannot exceed the cap of your subscription plan
+skip_file_viewer 	boolean 	When enabled, direct links to your files skip the file viewer page
+embed_domains 	string 	Space separated list of domains which are allowed to embed your files
+affiliate_user_name 	string 	Username of the account which receives affiliate rewards for your purchases, empty to remove
+checkout_country 	string 	Three letter country code used for checkout
+checkout_name 	string 	Name used for checkout
+checkout_provider 	string 	Payment provider used for checkout
+Returns
+
+HTTP 200: OK
+
+{
+	"success": true,
+	"value": "ok",
+	"message": "The requested action was successfully performed"
+}
+
+When an e-mail address was added the response is login_link_sent (HTTP 202), see POST /user/login.
+Possible errors
+Value 	HTTP status 	Description
+username_already_registered 	400 	An account with the new username already exists
+email_address_already_registered 	400 	An account with the new e-mail address already exists
+invalid_email_address 	400 	The new e-mail address is not valid
+too_many_email_addresses 	400 	The account already has the maximum of 5 e-mail addresses
+website_login_required 	403 	Changing the password requires a session which was created by logging in on the website
+login_link_already_sent 	400 	The account already has an active verification link, wait for it to expire
+not_enough_credit_for_prepaid 	400 	Activating a prepaid plan requires at least €1 of account credit
+invalid_domain_name 	400 	One of the embed domains does not contain a period
+user_not_found 	404 	The affiliate username does not exist
+
+DELETE/user/email
+
+Description
+
+Removes an e-mail address from the account. This also works for the address which is still waiting for verification.
+
+An account always keeps at least one address, the last one can’t be removed.
+Parameters
+Param 	Type 	Required 	Description
+email 	string 	true 	The e-mail address to remove
+Returns
+
+HTTP 200: OK
+
+{
+	"success": true,
+	"value": "ok",
+	"message": "The requested action was successfully performed"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+invalid_email_address 	400 	The e-mail address is not valid
+last_email_address 	400 	This is the last address on the account, accounts need at least one
+not_found 	404 	The address is not on the account
+
+DELETE/user
+
+Description
+
+Deletes the account. All sessions are logged out immediately and the account is scheduled for deletion in 7 days. If the account logs in again within those 7 days the deletion is cancelled. If the account has an e-mail address configured a message is sent to explain the deletion procedure.
+
+Only sessions which were created by logging in on the website can delete the account.
+Returns
+
+HTTP 200: OK
+
+{
+	"success": true,
+	"value": "ok",
+	"message": "The requested action was successfully performed"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+website_login_required 	403 	The request was not made by a session which was created by logging in on the website
+
+GET/user/files
+
+Description
+
+Returns a list of all the files on the account, up to a maximum of 50000. The file objects have the same structure as the GET /file/{id}/info response.
+Parameters
+Param 	Required 	Location 	Description
+format 	false 	URL 	When set to ‘csv’ the file list is returned as a CSV spreadsheet instead of JSON
+Returns
+
+HTTP 200: OK
+
+{
+	"files": [
+		{
+			"id": "1234abcd",
+			"name": "screenshot.png",
+			"size": 5694837,
+			... // Remaining file info fields, see GET /file/{id}/info
+		}
+	]
+}
+
+GET/user/lists
+
+Description
+
+Returns all the lists on the account. The list objects have the same structure as the GET /list/{id} response, except that the files array is not included.
+Parameters
+Param 	Required 	Location 	Description
+format 	false 	URL 	When set to ‘csv’ the lists are returned as a CSV spreadsheet instead of JSON
+Returns
+
+HTTP 200: OK
+
+{
+	"lists": [
+		{
+			"id": "L8bhwx",
+			"title": "Rust in Peace",
+			"date_created": "2020-02-04T18:34:13.466276Z",
+			"file_count": 3,
+			"can_edit": true
+		}
+	]
+}
+
+GET/user/time_series/{statistic}
+
+Description
+
+Returns historic usage statistics of the account.
+Parameters
+Param 	Required 	Location 	Description
+statistic 	true 	URL 	The statistic to get, can be ‘bandwidth’, ‘transfer_paid’, ‘views’ or ‘downloads’
+start 	true 	URL 	Start time of the data, RFC 3339 format
+end 	true 	URL 	End time of the data, RFC 3339 format
+interval 	true 	URL 	Duration of each time slot in minutes, between 1 and 1440
+Returns
+
+HTTP 200: OK
+
+{
+	"timestamps": [
+		"2024-02-04T18:00:00Z",
+		"2024-02-04T19:00:00Z"
+	],
+	"amounts": [
+		123456,
+		654321
+	]
+}
+
+Possible errors
+Value 	HTTP status 	Description
+not_found 	404 	The statistic in the URL is not one of the allowed values
+time_parse_failed 	422 	The start or end time was not formatted correctly
+missing_field 	400 	A required parameter was not sent
+
+GET/user/activity/{month}
+
+Description
+
+Returns the activity log of the account for one month. The activity log shows files which were removed from the account. The event field can be ‘file_instance_expired’, ‘file_instance_blocked’, ‘file_instance_lost’, ‘filesystem_node_blocked’ or ‘filesystem_node_lost’.
+Parameters
+Param 	Required 	Location 	Description
+month 	true 	URL 	The month to get activity for, formatted like ‘2024-02’
+Returns
+
+HTTP 200: OK
+
+[
+	{
+		"time": "2024-02-04T18:34:13.466276Z",
+		"event": "file_instance_expired",
+		"file_id": "1234abcd",
+		"file_name": "screenshot.png",
+		"file_removal_reason": "file_expired"
+	}
+]
+
+Possible errors
+Value 	HTTP status 	Description
+time_parse_failed 	422 	The month in the URL was not formatted correctly
+
+GET/user/transactions/{month}
+
+Description
+
+Returns the prepaid transaction log of the account for one month. All amounts are in micro euros, 1000000 = €1.
+Parameters
+Param 	Required 	Location 	Description
+month 	true 	URL 	The month to get transactions for, formatted like ‘2024-02’
+Returns
+
+HTTP 200: OK
+
+[
+	{
+		"time": "2024-02-04T18:34:13.466276Z",
+		"new_balance": 12500000,
+		"deposit_amount": 0,
+		"subscription_charge": -50000,
+		"storage_charge": -25000,
+		"storage_used": 1234567890,
+		"bandwidth_charge": -10000,
+		"bandwidth_used": 123456789,
+		"affiliate_amount": 0,
+		"affiliate_count": 0
+	}
+]
+
+Possible errors
+Value 	HTTP status 	Description
+time_parse_failed 	422 	The month in the URL was not formatted correctly
+
+POST/user/invoice
+
+Description
+
+Creates a new invoice to add credit to the account. The response contains a checkout URL where the payment can be completed.
+Parameters
+Param 	Type 	Required 	Description
+amount 	integer 	true 	Amount to deposit in micro euros, between 10000000 (€10) and 1000000000000 (€1000000)
+network 	enum 	true 	Payment method, can be ‘mollie’, ‘paypal’, ‘bancontact’, ‘eps’, ‘ideal’, ‘p24’, ‘trustly’, ‘btc’, ‘btc_lightning’, ‘doge’, ‘xmr’ or ‘ltc’
+country 	string 	true 	Two or three letter country code, used for calculating VAT
+name 	string 	for ‘ideal’ and ‘p24’ 	Full name of the customer, required by some payment methods
+Returns
+
+HTTP 200: OK
+
+{
+	"invoice_id": "abc123",
+	"checkout_url": "https://payment.provider/checkout/abc123"
+}
+
+GET/user/invoice
+
+Description
+
+Returns all the invoices of the account. Amounts are in micro euros, 1000000 = €1.
+Returns
+
+HTTP 200: OK
+
+[
+	{
+		"id": "abc123",
+		"time": "2024-02-04T18:34:13.466276Z",
+		"amount": 10000000,
+		"vat": 2100000,
+		"country": "NL",
+		"payment_gateway": "mollie",
+		"payment_method": "ideal",
+		"status": "paid"
+	}
+]
+
+GET/user/pay_invoice/{id}
+
+Description
+
+Redirects the browser to the checkout page of an open invoice. If the payment does not exist anymore the invoice is cancelled and the browser is redirected back to the website.
+Parameters
+Param 	Required 	Location 	Description
+id 	true 	URL 	ID of the invoice to pay
+Returns
+
+HTTP 302: Found, with a Location header pointing to the checkout page.
+Possible errors
+Value 	HTTP status 	Description
+not_found 	404 	No invoice exists with this ID
+
+PUT/user/file_customization
+
+Description
+
+Configures the appearance of the file viewer page for all the files on the account. This feature requires a subscription plan with file viewer branding support. The image fields accept the ID of an image file on your own account. The image needs to be of type JPEG, PNG, GIF or WebP and can be at most 10 MB large. Fields which are sent with an empty value are removed.
+Parameters
+Param 	Type 	Description
+theme 	string 	Color theme of the file viewer
+header_image 	string 	ID of an image file to show in the header
+header_link 	string 	URL to open when the header image is clicked, must start with https://
+background_image 	string 	ID of an image file to use as page background
+footer_image 	string 	ID of an image file to show in the footer
+footer_link 	string 	URL to open when the footer image is clicked, must start with https://
+affiliate_prompt 	string 	Affiliate message to show on the download page
+disable_download_button 	boolean 	Hides the download button on the file viewer
+disable_share_button 	boolean 	Hides the share button on the file viewer
+Returns
+
+HTTP 200: OK
+
+{
+	"success": true,
+	"value": "ok",
+	"message": "The requested action was successfully performed"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+branding_image_not_found 	404 	One of the image file IDs does not exist
+not_found 	404 	One of the image files does not belong to your account
+invalid_file_type 	400 	One of the image files is not a JPEG, PNG, GIF or WebP image
+file_too_large 	413 	One of the image files is larger than 10 MB
+invalid_link 	400 	The header or footer link does not start with https://
+
+POST/user/session
+
+Description
+
+Creates a new API key for the account. This is the same kind of key that POST /user/login returns, but this endpoint can be used to create extra keys for different applications without logging in again.
+
+Only sessions which were created by logging in on the website can create new keys, an API key can’t create more keys.
+Parameters
+Param 	Type 	Required 	Description
+app_name 	string 	false 	Name of your application, will be shown on the API keys page. The name ‘website login’ is reserved
+Returns
+
+HTTP 201: Created
+
+{
+	"auth_key": "550e8400-e29b-41d4-a716-446655440000",
+	"creation_ip_address": "192.0.2.1",
+	"user_agent": "Mozilla/5.0 ...",
+	"app_name": "my_app",
+	"creation_time": "2024-02-04T18:34:13.466276Z",
+	"last_used_time": "2024-02-04T18:34:13.466276Z",
+	"valid_domains": ["pixeldrain.com"]
+}
+
+Possible errors
+Value 	HTTP status 	Description
+website_login_required 	403 	The request was not made by a session which was created by logging in on the website
+app_name_reserved 	400 	The requested app name is reserved for the pixeldrain website
+
+GET/user/session
+
+Description
+
+Returns all the active sessions of the account. Use this to check for sessions which should not be there.
+
+Only sessions which were created by logging in on the website can list the account’s keys.
+Returns
+
+HTTP 200: OK
+
+[
+	{
+		"auth_key": "550e8400-e29b-41d4-a716-446655440000",
+		"creation_ip_address": "192.0.2.1",
+		"user_agent": "Mozilla/5.0 ...",
+		"app_name": "",
+		"creation_time": "2024-02-04T18:34:13.466276Z",
+		"last_used_time": "2024-02-04T18:34:13.466276Z"
+	}
+]
+
+Possible errors
+Value 	HTTP status 	Description
+website_login_required 	403 	The request was not made by a session which was created by logging in on the website
+
+DELETE/user/session
+
+Description
+
+Invalidates the API key which was used to make this request. This is the logout endpoint.
+
+Not every session is invalidated by this request. When the response value is not ‘ok’ the session is still usable and should be kept.
+Returns
+
+HTTP 200: OK
+
+{
+	"success": true,
+	"value": "ok",
+	"message": "The requested action was successfully performed"
+}
+
+GET/user/session/set_cookie
+
+Description
+
+Saves an API key as a login cookie in the browser. This is used by the website to transfer a login session from one pixeldrain domain to another. This endpoint does not use the regular API key authentication, instead the key is passed as a URL parameter. As a security measure this only works from the same IP address which created the API key.
+Parameters
+Param 	Required 	Location 	Description
+api_key 	true 	URL 	The API key to save in the pd_auth_key cookie
+Returns
+
+HTTP 200: OK, with a Set-Cookie header containing the API key.
+
+{
+	"success": true,
+	"value": "ok",
+	"message": "The requested action was successfully performed"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+authentication_failed 	401 	The API key does not exist
+invalid_key_ip 	401 	The request came from a different IP address than the one which created the API key
+
+POST/user/totp
+
+Description
+
+Manages two-factor authentication on the account. The form parameter action selects the operation to perform.
+
+Only sessions which were created by logging in on the website can manage two-factor authentication, an API key can’t enable or disable it.
+Action generate
+
+Generates a new TOTP secret. The secret is not saved to the account yet, use the verify action to enable it. The uri field can be rendered as a QR code for authenticator apps.
+
+HTTP 200: OK
+
+{
+	"secret": "ABCDEFGHIJKLMNOP23456789ABCDEF23",
+	"uri": "otpauth://totp/Pixeldrain:some_user?algorithm=SHA1&digits=6&issuer=Pixeldrain&period=30&secret=ABCDEFGHIJKLMNOP23456789ABCDEF23"
+}
+
+Action verify
+
+Verifies a one-time password against the generated secret and enables two-factor authentication on the account.
+Param 	Type 	Required 	Description
+action 	enum 	true 	‘verify’
+secret 	string 	true 	The secret from the generate action
+otp 	string 	true 	The current six digit code from your authenticator app
+Action delete
+
+Disables two-factor authentication on the account.
+Returns
+
+HTTP 200: OK
+
+{
+	"success": true,
+	"value": "ok",
+	"message": "The requested action was successfully performed"
+}
+
+Possible errors
+Value 	HTTP status 	Description
+otp_incorrect 	400 	The entered one-time password does not match the secret
+enum_parse_failed 	422 	The action is not ‘generate’, ‘verify’ or ‘delete’
+website_login_required 	403 	The request was not made by a session which was created by logging in on the website

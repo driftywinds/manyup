@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"context"
+	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -15,14 +18,22 @@ import (
 	"time"
 
 	"github.com/driftywinds/manyup/internal/config"
+	"github.com/driftywinds/manyup/internal/plugin"
 	"github.com/driftywinds/manyup/internal/services"
 	"github.com/driftywinds/manyup/internal/update"
 	"github.com/driftywinds/manyup/internal/uploader"
 )
 
+// credentialTimeout bounds the pre-save credential check.
+const credentialTimeout = 20 * time.Second
+
 var version = "0.1.0"
 
 func main() {
+	// A Windows update leaves the previous binary beside this one; drop it now
+	// that the process holding it has exited.
+	update.CleanupPreviousBinary()
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(0)
@@ -41,6 +52,12 @@ func main() {
 		cmdServices()
 	case "config":
 		cmdConfig()
+	case "completion":
+		cmdCompletion()
+	case "__complete":
+		cmdComplete()
+	case "where":
+		cmdWhere()
 	case "version":
 		fmt.Printf("manyup %s\n", version)
 	case "update", "-U", "--update":
@@ -64,20 +81,31 @@ COMMANDS:
   upload <file> [file...]     Upload file(s) to selected services
   services                    List available service plugins
   config menu                 Interactive service selector
-  config set <service> <key> <value>   Set a credential
+  config set <service> <value>         Set the API token (key defaults to API_TOKEN)
+  config set <service> <key> <value>   Set any credential explicitly
   config show                 Show current configuration
   config mode <parallel|sequential>    Set upload mode
   config select <service>     Toggle a service on/off
   config retry <max> [seconds]  Retries per service + base backoff delay
+  completion <shell>          Print a completion script (bash|zsh|fish|powershell|clink)
+  where                       Show where manyup is installed and where its config lives
   version                     Print version
   update, -U, --update       Check for and apply updates
+
+Credentials are checked against the service before they are saved, so a mistyped
+token is never persisted.
 
 EXAMPLES:
   # Interactive service selector
   manyup config menu
 
-  # Configure a service
-  manyup config set gofile API_KEY mytoken123
+  # Configure a service — the key defaults to API_TOKEN
+  manyup config set mocha mocha_xxxxxxxxxxxxxxxxx
+  manyup config set gofile API_TOKEN mytoken123
+
+  # Enable tab completion (then restart your shell)
+  manyup completion powershell | Out-String | Invoke-Expression
+  echo 'eval "$(manyup completion bash)"' >> ~/.bashrc
 
   # Upload a file
   manyup upload myfile.zip
@@ -166,6 +194,48 @@ func cmdServices() {
 	w.Flush()
 }
 
+// cmdWhere reports where this executable and its config file live, and whether
+// the install directory is reachable from PATH.
+func cmdWhere() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not determine the manyup executable path: %v\n", err)
+		os.Exit(1)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil {
+		exe = resolved
+	}
+
+	dir := filepath.Dir(exe)
+	fmt.Printf("manyup %s\n", version)
+	fmt.Printf("  binary:  %s\n", exe)
+	fmt.Printf("  config:  %s\n", config.Path())
+
+	if onPath(dir) {
+		fmt.Println("  on PATH: yes")
+		return
+	}
+
+	fmt.Println("  on PATH: no")
+	fmt.Printf("\nTo run manyup from anywhere, add this folder to your PATH:\n  %s\n", dir)
+	fmt.Println(`See the README section "Add manyup to PATH".`)
+}
+
+// onPath reports whether dir is one of the entries in PATH. Windows paths are
+// compared case-insensitively.
+func onPath(dir string) bool {
+	want := filepath.Clean(dir)
+	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
+		if entry == "" {
+			continue
+		}
+		if strings.EqualFold(filepath.Clean(entry), want) {
+			return true
+		}
+	}
+	return false
+}
+
 func cmdConfig() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -183,17 +253,41 @@ func cmdConfig() {
 	case "menu":
 		cmdConfigMenu()
 	case "set":
-		if len(args) < 4 {
-			fmt.Fprintln(os.Stderr, "Usage: manyup config set <service> <key> <value>")
+		service, key, value, parseErr := parseSetArgs(args[1:])
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", parseErr)
+			fmt.Fprintln(os.Stderr, "Usage: manyup config set <service> <value>")
+			fmt.Fprintln(os.Stderr, "       manyup config set <service> <key> <value>")
 			os.Exit(1)
 		}
-		service, key, value := args[1], args[2], args[3]
+
+		registry := services.All()
+		svc, ok := registry.Get(service)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Unknown service: %s (available: %s)\n",
+				service, strings.Join(registry.Names(), ", "))
+			os.Exit(1)
+		}
+
+		// Check the credential first: a token the service refuses is a typo,
+		// and persisting it would only postpone the failure to upload time.
+		note, verifyErr := authenticateCredential(svc, key, value)
+		if verifyErr != nil {
+			fmt.Fprintf(os.Stderr, "✗ %v\n", verifyErr)
+			fmt.Fprintln(os.Stderr, "Credential was not saved.")
+			os.Exit(1)
+		}
+
 		cfg.SetCredential(service, key, value)
 		if err := cfg.Save(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("✓ Set %s/%s\n", service, key)
+		if note != "" {
+			fmt.Printf("✓ Set %s/%s %s\n", service, key, note)
+		} else {
+			fmt.Printf("✓ Set %s/%s\n", service, key)
+		}
 
 	case "show":
 		printConfig(cfg)
@@ -283,13 +377,83 @@ func printConfigUsage() {
 	fmt.Print(`Usage: manyup config <command>
 
 Commands:
-  menu                          Interactive service selector
-  set <service> <key> <value>   Set a credential for a service
-  show                          Show current configuration
-  mode <parallel|sequential>    Set upload mode
-  select <service>              Toggle a service on/off
-  retry <max> [seconds]         Retries per service + base backoff delay (0 disables)
+  menu                        Interactive service selector
+  set <service> <value>       Set the API token (key defaults to API_TOKEN)
+  set <service> <key> <value> Set any credential explicitly
+  show                        Show current configuration
+  mode <parallel|sequential>  Set upload mode
+  select <service>            Toggle a service on/off
+  retry <max> [seconds]       Retries per service + base backoff delay (0 disables)
+
+Credentials are checked against the service before they are saved.
 `)
+}
+
+// parseSetArgs accepts both forms of `config set`:
+//
+//	manyup config set <service> <value>          key defaults to API_TOKEN
+//	manyup config set <service> <key> <value>
+func parseSetArgs(args []string) (service, key, value string, err error) {
+	switch {
+	case len(args) < 2:
+		return "", "", "", errors.New("missing service and value")
+	case len(args) > 3:
+		return "", "", "", errors.New("too many arguments")
+	}
+
+	service = args[0]
+	if len(args) == 2 {
+		key, value = "API_TOKEN", args[1]
+	} else {
+		key, value = args[1], args[2]
+	}
+
+	if value == "" {
+		return "", "", "", fmt.Errorf("the value for %s/%s cannot be empty", service, key)
+	}
+	return service, key, value, nil
+}
+
+// isCredentialKey reports whether a config key identifies the caller to a
+// service. Options such as a folder id are not credentials and are not checked.
+func isCredentialKey(key string) bool {
+	switch key {
+	case "API_TOKEN", "API_KEY", "TOKEN":
+		return true
+	}
+	return false
+}
+
+// authenticateCredential verifies a credential against the service before the
+// CLI persists it, and returns a short note for the success message.
+//
+// A credential the service explicitly rejects is returned as an error so the
+// caller can abort without saving. When the check cannot be completed — the
+// host is unreachable, rate limiting, or the service has no verifier — the
+// credential is still saved and the note says so, because refusing would make
+// configuration impossible whenever a host is down.
+func authenticateCredential(svc plugin.Uploader, key, value string) (string, error) {
+	if !isCredentialKey(key) {
+		return "", nil
+	}
+
+	verifier, ok := svc.(plugin.CredentialVerifier)
+	if !ok {
+		return "(saved without verification — this service has no credential check)", nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), credentialTimeout)
+	defer cancel()
+
+	err := verifier.VerifyCredentials(ctx, plugin.Credentials{key: value}, nil)
+	switch {
+	case err == nil:
+		return "(verified)", nil
+	case errors.Is(err, plugin.ErrCredentialRejected):
+		return "", err
+	default:
+		return fmt.Sprintf("(saved, but it could not be verified: %v)", err), nil
+	}
 }
 
 // ── Interactive config menu ─────────────────────────────────────────
@@ -610,28 +774,25 @@ func cmdUpdate() {
 	fmt.Println("Checking for updates...")
 	platform := detectPlatform()
 
-	// Parse current version (strip v prefix if present)
-	currentSemVer, err := update.ParseSemVer(version)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing current version %s: %v\n", version, err)
-		os.Exit(1)
-	}
-
 	latest, err := update.CheckLatest()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error checking for updates: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Compare semantically
-	if !latest.Version.IsNewer(currentSemVer) {
-		fmt.Printf("✓ manyup %s is already the latest version.\n", currentSemVer.String())
+	// A build from source may carry a version that is not X.Y.Z (for example
+	// "dev"). Treat that as older than any release rather than refusing to
+	// update at all.
+	current, parseErr := update.ParseSemVer(version)
+	if parseErr == nil && !latest.Version.IsNewer(current) {
+		fmt.Printf("✓ manyup %s is already the latest version.\n", current.String())
 		return
 	}
 
-	fmt.Printf("Current version: %s\n", currentSemVer.String())
-	fmt.Printf("Latest version:  %s\n", latest.TagName)
-	fmt.Printf("Platform:        %s\n", platform)
+	shown := version
+	if parseErr == nil {
+		shown = current.String()
+	}
 
 	assetURL, err := latest.FindAsset(platform)
 	if err != nil {
@@ -639,12 +800,152 @@ func cmdUpdate() {
 		os.Exit(1)
 	}
 
+	fmt.Printf("Current version: %s\n", shown)
+	fmt.Printf("Latest version:  %s\n", latest.TagName)
+	fmt.Printf("Platform:        %s\n", platform)
 	fmt.Printf("\nDownloading %s...\n", latest.TagName)
-	if err := update.DownloadAndReplace(assetURL, version); err != nil {
-		fmt.Fprintf(os.Stderr, "Error updating: %v\n", err)
+
+	if err := update.Apply(assetURL); err != nil {
+		fmt.Fprintf(os.Stderr, "\nError updating: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("✓ Updated to %s successfully!\n", latest.TagName)
-	fmt.Println("Run 'manyup version' to confirm.")
+	fmt.Printf("\n✓ Updated to %s. The next time you run manyup it will be the new version.\n", latest.TagName)
 }
+
+// ── Shell completion ────────────────────────────────────────────────────
+//
+// Completion is split in two: this program prints candidate words, and a small
+// shell script (printed by `manyup completion <shell>`) asks for them on tab.
+// Nothing happens until the script is sourced into the user's shell profile.
+
+// topLevelCommands are offered when completing the first word.
+var topLevelCommands = []string{
+	"upload", "services", "config", "completion", "where", "version", "update", "help",
+}
+
+// configCommands are offered after `manyup config`.
+var configCommands = []string{"menu", "set", "show", "mode", "select", "retry"}
+
+// shells are the completion scripts this build can emit.
+var shells = []string{"bash", "zsh", "fish", "powershell", "clink"}
+
+// clinkCompletion is the cmd.exe (Clink) script. It is embedded so the binary
+// can print it without shipping a separate file next to the executable.
+//
+//go:embed scripts/clink/manyup.lua
+var clinkCompletion string
+
+// cmdComplete prints the candidates for the words already typed. It is the
+// hidden backend used by the generated completion scripts.
+func cmdComplete() {
+	for _, candidate := range completionCandidates(os.Args[2:]) {
+		fmt.Println(candidate)
+	}
+}
+
+// completionCandidates maps the words typed so far (everything after "manyup",
+// excluding the word being completed) to the words that may follow.
+func completionCandidates(words []string) []string {
+	if len(words) == 0 {
+		return topLevelCommands
+	}
+
+	switch words[0] {
+	case "config":
+		switch len(words) {
+		case 1:
+			return configCommands
+		case 2:
+			switch words[1] {
+			case "set", "select":
+				return services.All().Names()
+			case "mode":
+				return []string{"parallel", "sequential"}
+			}
+		}
+	case "completion":
+		if len(words) == 1 {
+			return shells
+		}
+	}
+	return nil
+}
+
+// cmdCompletion prints the completion script for a shell.
+func cmdCompletion() {
+	if len(os.Args) < 3 {
+		fmt.Fprintf(os.Stderr, "Usage: manyup completion <%s>\n", strings.Join(shells, "|"))
+		os.Exit(1)
+	}
+
+	script, ok := completionScript(os.Args[2])
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Unsupported shell: %s (supported: %s)\n",
+			os.Args[2], strings.Join(shells, ", "))
+		os.Exit(1)
+	}
+	fmt.Print(script)
+}
+
+func completionScript(shell string) (string, bool) {
+	switch shell {
+	case "bash":
+		return bashCompletion, true
+	case "zsh":
+		return zshCompletion, true
+	case "fish":
+		return fishCompletion, true
+	case "powershell", "pwsh":
+		return powershellCompletion, true
+	case "clink":
+		return clinkCompletion, true
+	}
+	return "", false
+}
+
+const bashCompletion = `# manyup completion for bash — add this line to ~/.bashrc:
+#   eval "$(manyup completion bash)"
+_manyup_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local args=()
+    local i
+    for ((i = 1; i < COMP_CWORD; i++)); do
+        args+=("${COMP_WORDS[i]}")
+    done
+    local candidates
+    candidates="$(manyup __complete "${args[@]}" 2>/dev/null)"
+    COMPREPLY=($(compgen -W "${candidates}" -- "${cur}"))
+}
+complete -o default -F _manyup_completions manyup
+`
+
+const zshCompletion = `# manyup completion for zsh — add this line to ~/.zshrc:
+#   eval "$(manyup completion zsh)"
+_manyup() {
+    local -a args candidates
+    args=("${words[2,$((CURRENT - 1))]}")
+    candidates=("${(@f)$(manyup __complete "${args[@]}" 2>/dev/null)}")
+    compadd -a candidates
+}
+compdef _manyup manyup
+`
+
+const fishCompletion = `# manyup completion for fish — add this line to ~/.config/fish/config.fish:
+#   manyup completion fish | source
+complete -c manyup -f -a '(manyup __complete (commandline -opc)[2..-1] 2>/dev/null)'
+`
+
+const powershellCompletion = `# manyup completion for PowerShell — add this line to your $PROFILE:
+#   manyup completion powershell | Out-String | Invoke-Expression
+Register-ArgumentCompleter -Native -CommandName manyup -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $words = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.ToString() })
+    if ($words.Count -gt 0 -and $words[-1] -eq $wordToComplete) {
+        $words = @($words | Select-Object -SkipLast 1)
+    }
+    manyup __complete @words 2>$null | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}
+`

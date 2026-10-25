@@ -359,7 +359,7 @@ func TestMochaUploadPropagatesStatus(t *testing.T) {
 	}
 }
 
-func TestMochaChunkSize(t *testing.T) {
+func TestChunkSize(t *testing.T) {
 	cases := []struct {
 		size       int64
 		partSize   int64
@@ -373,8 +373,8 @@ func TestMochaChunkSize(t *testing.T) {
 		{1, 4, 1, 1},
 	}
 	for _, c := range cases {
-		if got := mochaChunkSize(c.size, c.partSize, c.partNumber); got != c.want {
-			t.Errorf("mochaChunkSize(%d, %d, %d) = %d, want %d", c.size, c.partSize, c.partNumber, got, c.want)
+		if got := chunkSize(c.size, c.partSize, c.partNumber); got != c.want {
+			t.Errorf("chunkSize(%d, %d, %d) = %d, want %d", c.size, c.partSize, c.partNumber, got, c.want)
 		}
 	}
 }

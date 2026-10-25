@@ -1,0 +1,398 @@
+
+api API v1
+API Documentation
+
+Upload files, manage your content, and access your account programmatically.
+Getting Started
+
+All API requests require an API key for authentication. You can generate your API key from Settings.
+
+Base URL
+https://zincdrive.com/api/v1
+
+Authentication
+
+Pass your API key via the X-API-Key header or as a query parameter:
+# Header method (recommended)
+X-API-Key: your_api_key_here
+
+# Query parameter method
+https://zincdrive.com/api/v1/account?api_key=your_api_key_here
+warning
+
+Rate Limit: 60 requests per minute. Keep your API key secret — do not share it publicly.
+GET
+/api/v1/account
+
+Get your account information including balance, file counts, and plan details.
+
+Example Request
+
+curl -H "X-API-Key: YOUR_KEY" https://zincdrive.com/api/v1/account
+
+content_copy
+
+Example Response
+
+{
+  "status": "success",
+  "data": {
+    "username": "johndoe",
+    "email": "john@example.com",
+    "balance": "12.50",
+    "files_count": 42,
+    "folders_count": 5,
+    "storage_used": 1073741824,
+    "storage_limit": 5368709120,
+    "plan": "Premium"
+  }
+}
+
+GET
+/api/v1/files
+
+List your uploaded files. Returns paginated results.
+
+Parameters
+folder_id
+integer Filter files by folder ID. Omit for root-level files.
+per_page
+integer Results per page (default: 50, max: 100).
+
+Example Request
+
+curl -H "X-API-Key: YOUR_KEY" https://zincdrive.com/api/v1/files
+
+content_copy
+
+Example Response
+
+{
+  "status": "success",
+  "data": [
+    {
+      "id": 1,
+      "hash_id": "abc123",
+      "name": "document.pdf",
+      "size": 1048576,
+      "size_formatted": "1 MB",
+      "extension": "pdf",
+      "downloads": 150,
+      "visibility": "Public",
+      "visibility_id": 1,
+      "download_link": "https://zincdrive.com/file/abc123",
+      "created_at": "2026-02-22T10:00:00.000000Z"
+    }
+  ],
+  "pagination": {
+    "current_page": 1,
+    "last_page": 1,
+    "per_page": 50,
+    "total": 1
+  }
+}
+
+GET
+/api/v1/folders
+
+List your folders.
+
+Parameters
+parent_id
+integer Filter by parent folder ID. Omit for root-level folders.
+
+Example Request
+
+curl -H "X-API-Key: YOUR_KEY" https://zincdrive.com/api/v1/folders
+
+content_copy
+
+Example Response
+
+{
+  "status": "success",
+  "data": [
+    {
+      "id": 1,
+      "name": "Documents",
+      "files_count": 12,
+      "created_at": "2026-02-22T10:00:00.000000Z"
+    }
+  ]
+}
+
+POST
+/api/v1/upload/url
+
+Upload a file by URL. Creates an async task that downloads the file and uploads it to your account. Poll the status endpoint to track progress.
+
+Parameters
+url
+required
+string The URL to download the file from.
+folder_id
+integer Upload into a specific folder.
+visibility
+integer 1 = public, 0 = private, 2 = unlisted. Default: 1 (public).
+
+Example Request
+
+curl -X POST -H "X-API-Key: YOUR_KEY" \
+  -d "url=https://example.com/file.zip" \
+  -d "visibility=1" \
+  https://zincdrive.com/api/v1/upload/url
+
+content_copy
+
+Example Response
+
+{
+  "status": "success",
+  "data": {
+    "task_id": "a1b2c3d4e5f6...",
+    "message": "URL upload task created. Poll the status endpoint to track progress."
+  }
+}
+
+GET
+/api/v1/upload/url/status/{taskId}
+
+Check the status of a URL upload task. Poll this endpoint until task_status is "completed" or "failed".
+
+Parameters
+taskId
+required
+string The task_id returned from the upload/url endpoint.
+
+Example Request
+
+curl -H "X-API-Key: YOUR_KEY" https://zincdrive.com/api/v1/upload/url/status/a1b2c3d4e5f6
+
+content_copy
+
+Example Response
+
+{
+  "status": "success",
+  "data": {
+    "task_id": "a1b2c3d4e5f6...",
+    "url": "https://example.com/file.zip",
+    "task_status": "completed",
+    "shared_id": "xyz789",
+    "download_link": "https://zincdrive.com/file/xyz789",
+    "filename": "file.zip",
+    "size": 12345678,
+    "size_formatted": "11.77 MB"
+  }
+}
+
+POST
+/api/v1/upload/url/cancel
+
+Cancel all your pending/processing URL upload tasks.
+
+Example Request
+
+curl -X POST -H "X-API-Key: YOUR_KEY" https://zincdrive.com/api/v1/upload/url/cancel
+
+content_copy
+
+Example Response
+
+{
+  "status": "success",
+  "data": {
+    "cancelled_count": 2
+  }
+}
+
+DELETE
+/api/v1/files/{id}
+
+Delete a file by its ID.
+
+Parameters
+id
+required
+integer The file ID from the files list endpoint.
+
+Example Request
+
+curl -X DELETE -H "X-API-Key: YOUR_KEY" https://zincdrive.com/api/v1/files/42
+
+content_copy
+
+Example Response
+
+{
+  "status": "success",
+  "message": "File deleted successfully."
+}
+
+Direct S3 Upload
+
+ZincDrive supports high-performance direct-to-storage uploads. Files are streamed directly to our storage nodes, bypassing the main application server. This supports massive file sizes up to 10GB.
+POST
+/api/v1/s3/sign
+
+Get a presigned PUT URL for single-part upload. This is the fastest method for files up to 4GB.
+
+Parameters
+filename
+required
+string Original filename including extension.
+type
+string MIME type of the file (e.g. video/mp4).
+
+Example Request
+
+curl -X POST -H "X-API-Key: YOUR_KEY" \
+  -d "filename=video.mp4" \
+  https://zincdrive.com/api/v1/s3/sign
+
+content_copy
+
+Example Response
+
+{
+  "url": "https://s1.zincdrive.com/upload/bucket/...",
+  "method": "PUT",
+  "headers": { "content-type": "application/octet-stream" },
+  "key": "uploads/users/..."
+}
+
+WORKFLOW
+Multipart Upload (up to 10GB)
+
+For files up to 10GB, use the multipart workflow. This allows you to upload parts in parallel and resume interrupted transfers.
+Step 1: Initiate
+POST /s3/multipart
+
+Returns an uploadId and key.
+Step 2: Sign & Put
+GET /s3/multipart/{id}/{part}
+
+Get a URL for each part, then PUT the bytes.
+Step 3: Complete
+POST /s3/multipart/{id}/complete
+
+Send the list of ETags to finish the upload.
+POST
+/api/v1/s3/confirm
+
+MANDATORY: Call this after the S3 transfer (PUT) is finished to create the file entry in your account.
+
+Parameters
+key
+required
+string The object key returned by the sign or multipart endpoint.
+filename
+required
+string The original filename.
+size
+required
+integer The total file size in bytes.
+folder
+integer Folder ID.
+visibility
+integer 1 = public, 0 = private, 2 = unlisted.
+
+Example Request
+
+curl -X POST -H "X-API-Key: YOUR_KEY" \
+  -d "key=uploads/users/..." \
+  -d "filename=video.mp4" \
+  -d "size=12345678" \
+  https://zincdrive.com/api/v1/s3/confirm
+
+content_copy
+
+Example Response
+
+{
+  "type": "success",
+  "shared_id": "xyz789",
+  "download_link": "https://zincdrive.com/file/xyz789"
+}
+
+Complete Examples (Direct S3)
+
+Python (Single-Part)
+
+import requests, os
+
+def upload_file(filepath, api_key, api_base="https://zincdrive.com/api/v1"):
+    filename = os.path.basename(filepath)
+    size = os.path.getsize(filepath)
+    
+    # 1. Get signed URL
+    r = requests.post(f"{api_base}/s3/sign", 
+                     headers={"X-API-Key": api_key}, 
+                     data={"filename": filename})
+    signed = r.json()
+    
+    # 2. Upload to S3
+    with open(filepath, "rb") as f:
+        requests.put(signed["url"], data=f, headers=signed["headers"])
+    
+    # 3. Confirm
+    r = requests.post(f"{api_base}/s3/confirm",
+                     headers={"X-API-Key": api_key},
+                     data={
+                         "key": signed["key"],
+                         "filename": filename,
+                         "size": size
+                     })
+    return r.json()["download_link"]
+
+link = upload_file("/path/to/video.mp4", "YOUR_API_KEY")
+print(f"File uploaded: {link}")
+
+content_copy
+
+Node.js (Single-Part)
+
+const fs = require("fs");
+const path = require("path");
+const fetch = require("node-fetch"); // npm i node-fetch
+
+async function uploadFile(filepath, apiKey, apiBase = "https://zincdrive.com/api/v1") {
+    const filename = path.basename(filepath);
+    const size = fs.statSync(filepath).size;
+
+    // 1. Get signed URL
+    const resSign = await fetch(`${apiBase}/s3/sign`, {
+        method: "POST",
+        headers: { "X-API-Key": apiKey, "Content-Type": "application/x-www-form-urlencoded" },
+        body: `filename=${encodeURIComponent(filename)}`
+    });
+    const signed = await resSign.json();
+
+    // 2. Upload to S3
+    await fetch(signed.url, {
+        method: "PUT",
+        headers: signed.headers,
+        body: fs.createReadStream(filepath)
+    });
+
+    // 3. Confirm
+    const resConfirm = await fetch(`${apiBase}/s3/confirm`, {
+        method: "POST",
+        headers: { "X-API-Key": apiKey, "Content-Type": "application/x-www-form-urlencoded" },
+        body: `key=${encodeURIComponent(signed.key)}&filename=${encodeURIComponent(filename)}&size=${size}`
+    });
+    const confirm = await resConfirm.json();
+    return confirm.download_link;
+}
+
+uploadFile("/path/to/video.mp4", "YOUR_API_KEY").then(console.log);
+
+content_copy
+Error Responses
+Status 	Meaning
+401 	Missing or invalid API key
+403 	Subscription expired or feature not available
+404 	Resource not found
+422 	Validation error (check the message field)
+429 	Rate limit exceeded (60 req/min)
+500 	Server error

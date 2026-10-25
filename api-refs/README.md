@@ -11,13 +11,18 @@ client-rendered, sign-in gated, or have gone offline.
 | Service | Plugin | Auth | Upload method | Max size | Reference |
 |---|---|---|---|---|---|
 | 0x0.st | `0x0.go` | none | `multipart/form-data` POST | 512 MiB | [0x0.md](0x0.md) |
-| BuzzHeavier | `buzzheavier.go` | optional token | raw `PUT` | unlimited | [buzzheavier.md](buzzheavier.md) |
+| BuzzHeavier | `buzzheavier.go` | optional account id | raw `PUT` | no documented limit | [buzzheavier.md](buzzheavier.md) |
 | DataNodes | `datanodes.go` | **required** key | resolve server + multipart POST | 3 GB free / unlimited premium | [datanodes.md](datanodes.md) |
-| GoFile | `gofile.go` | optional token | `multipart/form-data` POST | unlimited | [gofile.md](gofile.md) |
+| GoFile | `gofile.go` | optional token | `multipart/form-data` POST | no per-file cap; free tier allows 10,000 stored files | [gofile.md](gofile.md) |
 | Mocha | `mocha.go` | **required** key | multipart presigned `PUT` | 20 GiB (per account) | [mocha.md](mocha.md) |
-| PixelDrain | `pixeldrain.go` | optional key | raw `PUT` | plan-dependent | [pixeldrain.md](pixeldrain.md) |
+| PixelDrain | `pixeldrain.go` | **required** key | raw `PUT` | plan-dependent | [pixeldrain.md](pixeldrain.md) |
 | VikingFile | `vikingfile.go` | optional hash | chunked presigned `PUT` | unlimited | [vikingfile.md](vikingfile.md) |
-| ZincDrive | `zincdrive.go` | **required** key | S3 presigned `PUT` + confirm | 10 GB | [zincdrive.md](zincdrive.md) |
+| ZincDrive | `zincdrive.go` | **required** key | S3 presigned `PUT` + confirm | 4 GB single-part; 10 GB multipart | [zincdrive.md](zincdrive.md) |
+
+Vendor documentation snapshots live beside the references as `<service>.txt`. Each
+`<service>.md` is the normalised reference derived from that snapshot plus the plugin
+source, and ends with a divergence section wherever the implementation and the vendor
+disagree.
 
 `mocha.txt` and `Mocha.htm` in this directory are raw saves of the Mocha API docs page.
 Both are **client-rendered shells** — the page body is empty until JavaScript runs, and
@@ -45,6 +50,26 @@ Plugins read credentials from a `plugin.Credentials` map. The keys actually used
 
 The uploader merges env vars of the form `MANYUP_<SERVICE>_<KEY>` into that map, so
 `MANYUP_MOCHA_API_TOKEN` is the env fallback for `manyup config set mocha API_TOKEN ...`.
+
+`manyup config set` accepts the short form `config set <service> <value>`, which fills
+`API_TOKEN` for you.
+
+### Credential checks
+
+A plugin may implement `plugin.CredentialVerifier` so `manyup config set` can reject a
+mistyped token before it reaches `config.json`. Each check is one cheap authenticated
+request; a `401`/`403` means "rejected", while `429`/`5xx` or a transport failure is
+treated as inconclusive so a working token is never discarded because a host is down.
+
+| Service | Check request | Rejected when |
+|---|---|---|
+| Mocha | `GET https://api.mocha.my/api/profile/summary` | `401` |
+| GoFile | `GET https://api.gofile.io/accounts/getid` | `401` (`{"status":"error-token"}`) |
+| DataNodes | `GET https://datanodes.to/api/upload/server?key=...` | body has no `sess_id` (HTTP stays `200`) |
+| ZincDrive | `POST https://zincdrive.com/api/v1/s3/sign` | `401` |
+| BuzzHeavier | `GET https://buzzheavier.com/api/account` | `401` |
+| PixelDrain | `GET https://pixeldrain.com/api/user` (Basic) | `401` |
+| VikingFile | *(none available)* | — saved unverified |
 
 ### Reliability contract
 

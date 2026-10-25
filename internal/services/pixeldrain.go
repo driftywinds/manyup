@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 
 	"github.com/driftywinds/manyup/internal/httpclient"
 	"github.com/driftywinds/manyup/internal/plugin"
@@ -15,6 +16,7 @@ import (
 
 const (
 	pdAPIBase = "https://pixeldrain.com/api"
+	pdUserURL = "https://pixeldrain.com/api/user"
 )
 
 // PixelDrain uploads files via raw PUT to pixeldrain.com/api/file/{filename}.
@@ -27,11 +29,32 @@ func RegisterPixelDrain(r *plugin.Registry) {
 	r.Register(&PixelDrain{})
 }
 
-func (p *PixelDrain) Name() string                { return "pixeldrain" }
-func (p *PixelDrain) DisplayName() string          { return "PixelDrain" }
-func (p *PixelDrain) Description() string          { return "PixelDrain file hosting (PUT upload, free tier)" }
-func (p *PixelDrain) RequiredCredentials() []string { return nil } // token is optional (anonymous may work)
-func (p *PixelDrain) SupportsLargeUpload() bool    { return true }
+func (p *PixelDrain) Name() string        { return "pixeldrain" }
+func (p *PixelDrain) DisplayName() string { return "PixelDrain" }
+func (p *PixelDrain) Description() string {
+	return "PixelDrain file hosting (API key required, PUT upload)"
+}
+
+// RequiredCredentials reports the API key as mandatory: PixelDrain rejects
+// uploads without one (401), so a missing key can only fail at upload time.
+func (p *PixelDrain) RequiredCredentials() []string { return []string{"API_TOKEN"} }
+func (p *PixelDrain) SupportsLargeUpload() bool     { return true }
+
+// VerifyCredentials checks an API key against the account endpoint. PixelDrain
+// uses the same Basic scheme for this call as it does for uploads.
+func (p *PixelDrain) VerifyCredentials(ctx context.Context, creds plugin.Credentials, cfg plugin.Config) error {
+	token := strings.TrimSpace(creds["API_TOKEN"])
+	if token == "" {
+		return fmt.Errorf("pixeldrain: %w: API_TOKEN is empty", plugin.ErrCredentialRejected)
+	}
+
+	auth := base64.StdEncoding.EncodeToString([]byte(":" + token))
+	status, body, err := authGet(ctx, pdUserURL, "Authorization", "Basic "+auth)
+	if err != nil {
+		return fmt.Errorf("pixeldrain: could not verify: %w", err)
+	}
+	return authCheckOutcome("pixeldrain", status, body)
+}
 
 // pdUploadResponse is the JSON envelope returned by the PixelDrain PUT /api/file/{name} endpoint.
 type pdUploadResponse struct {

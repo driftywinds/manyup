@@ -1,12 +1,12 @@
 package update
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -151,132 +151,201 @@ func (r *ReleaseInfo) FindAsset(platform string) (string, error) {
 	return "", fmt.Errorf("no release asset found for platform %s", platform)
 }
 
-// DownloadAndReplace downloads the new binary and replaces the current one
-func DownloadAndReplace(downloadURL, currentVersion string) error {
-	// Create an HTTP client with tuned settings for speed
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:        1,
-			MaxIdleConnsPerHost: 1,
-			IdleConnTimeout:     10 * time.Second,
-		},
+// minBinarySize is the smallest plausible manyup binary. Anything smaller is a
+// truncated download or an error page, not an executable.
+const minBinarySize = 1 << 20 // 1 MiB
+
+// downloadTimeout bounds the whole download, not each read.
+const downloadTimeout = 5 * time.Minute
+
+// Apply downloads the release at downloadURL and swaps it in for the currently
+// running executable, then returns. The caller keeps running the old image in
+// memory; the next launch picks up the new binary.
+//
+// The new binary is written into the install folder, so the final step is a
+// rename on the same volume rather than a copy. That matters on Windows, where
+// the running executable cannot be opened for writing but can be renamed aside.
+func Apply(downloadURL string) error {
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locating the running binary: %w", err)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(execPath); resolveErr == nil {
+		execPath = resolved
+	}
+	return ApplyTo(execPath, downloadURL)
+}
+
+// ApplyTo replaces the binary at execPath. It is exported separately so tests
+// can point it at a scratch file instead of the running process image.
+func ApplyTo(execPath, downloadURL string) error {
+	dir := filepath.Dir(execPath)
+
+	// Fail fast and clearly when the install folder is read-only, instead of
+	// downloading for a minute and then failing on the rename.
+	tmpFile, err := os.CreateTemp(dir, ".manyup-update-*")
+	if err != nil {
+		return fmt.Errorf("the install folder %q is not writable (try running as administrator): %w", dir, err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath) // a no-op once the rename has moved the file
+
+	if err := downloadTo(downloadURL, tmpPath); err != nil {
+		return err
+	}
+	if err := validateBinary(tmpPath); err != nil {
+		return err
 	}
 
-	// Download the new binary
-	req, err := http.NewRequest("GET", downloadURL, nil)
+	stalePath := execPath + ".old"
+	if _, statErr := os.Stat(stalePath); statErr == nil {
+		// Left behind by an earlier update whose process had not exited yet.
+		if rmErr := os.Remove(stalePath); rmErr != nil {
+			return fmt.Errorf("cannot remove the previous binary %q: %w (close any other manyup processes and retry)", stalePath, rmErr)
+		}
+	}
+
+	if runtime.GOOS == "windows" {
+		// A running image cannot be overwritten, but it can be renamed.
+		if err := os.Rename(execPath, stalePath); err != nil {
+			return fmt.Errorf("could not move the current binary aside: %w", err)
+		}
+		if err := os.Rename(tmpPath, execPath); err != nil {
+			// Never leave the install without a working binary.
+			_ = os.Rename(stalePath, execPath)
+			return fmt.Errorf("could not install the new binary: %w", err)
+		}
+		return nil
+	}
+
+	// On Unix the rename replaces the target atomically.
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		return fmt.Errorf("could not mark the new binary executable: %w", err)
+	}
+	if err := os.Rename(tmpPath, execPath); err != nil {
+		return fmt.Errorf("could not install the new binary: %w", err)
+	}
+	return nil
+}
+
+// CleanupPreviousBinary deletes the "<exe>.old" copy that a Windows update
+// leaves behind. Call it once at start-up; it is a no-op elsewhere and never
+// reports errors.
+func CleanupPreviousBinary() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	execPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(execPath); resolveErr == nil {
+		execPath = resolved
+	}
+	_ = os.Remove(execPath + ".old")
+}
+
+// downloadTo fetches downloadURL into path, rejecting anything that does not
+// arrive completely or is too small to be a real binary.
+func downloadTo(downloadURL, path string) error {
+	client := &http.Client{Timeout: downloadTimeout}
+
+	req, err := http.NewRequest(http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("creating the download request: %w", err)
 	}
 	req.Header.Set("Accept", "application/octet-stream")
+	req.Header.Set("User-Agent", "manyup-updater")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to download: %w", err)
+		return fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return fmt.Errorf("download failed: server returned status %d", resp.StatusCode)
 	}
 
-	// Create a temporary file to download to - use temp dir on same filesystem for fast rename
-	tmpDir, err := os.MkdirTemp("", "manyup-update-*")
+	dst, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
-		return fmt.Errorf("failed to create temp dir: %w", err)
+		return fmt.Errorf("opening the download target: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
 
-	tmpFile, err := os.CreateTemp(tmpDir, "manyup-binary-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	// Download with progress tracking
 	progress := &progressWriter{}
-	teeReader := io.TeeReader(resp.Body, progress)
-	n, err := io.Copy(tmpFile, teeReader)
-	tmpFile.Close()
-	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("downloaded file is empty")
-	}
-	fmt.Println() // New line after progress dots
+	written, copyErr := io.Copy(dst, io.TeeReader(resp.Body, progress))
+	closeErr := dst.Close()
+	fmt.Println()
 
-	// Get the current executable path
-	execPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to get executable path: %w", err)
+	if copyErr != nil {
+		return fmt.Errorf("download failed: %w", copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("writing the downloaded binary: %w", closeErr)
 	}
 
-	// Get the directory of the executable for the rename
-	execDir := filepath.Dir(execPath)
-
-	// On Windows, we can't replace a running executable directly
-	if runtime.GOOS == "windows" {
-		return replaceOnWindows(execPath, tmpFile.Name())
+	if expected := resp.ContentLength; expected > 0 && written != expected {
+		return fmt.Errorf("download was incomplete: got %d of %d bytes", written, expected)
 	}
-
-	// Move temp file to the executable's directory for atomic rename
-	// This ensures we're on the same filesystem for a fast rename
-	finalTempPath := filepath.Join(execDir, ".manyup_update_tmp")
-	if err := os.Rename(tmpFile.Name(), finalTempPath); err != nil {
-		return fmt.Errorf("failed to move temp file: %w", err)
+	if written < minBinarySize {
+		return fmt.Errorf("download is only %d bytes, which is too small to be manyup", written)
 	}
-	defer os.Remove(finalTempPath)
-
-	// Make the temp file executable
-	if err := os.Chmod(finalTempPath, 0755); err != nil {
-		return fmt.Errorf("failed to make temp file executable: %w", err)
-	}
-
-	// Replace the current binary with atomic rename
-	if err := os.Rename(finalTempPath, execPath); err != nil {
-		return fmt.Errorf("failed to replace binary: %w", err)
-	}
-
 	return nil
 }
 
-
-// replaceOnWindows handles Windows-specific binary replacement
-func replaceOnWindows(execPath, tmpFile string) error {
-	// On Windows, we need to:
-	// 1. Copy the new binary to a temp location
-	// 2. Create a batch script that will replace the binary and relaunch
-	// 3. Run the batch script and exit
-
-	// Get the directory of the executable
-	execDir := filepath.Dir(execPath)
-	tmpBatch := filepath.Join(execDir, ".manyup_update.bat")
-
-	// Create the batch script
-	batchContent := fmt.Sprintf(`@echo off
-timeout /t 1 /nobreak >nul
-copy /Y "%s" "%s" >nul
-del "%s"
-start "" "%s"
-exit
-`, tmpFile, execPath, tmpBatch, execPath)
-
-	if err := os.WriteFile(tmpBatch, []byte(batchContent), 0644); err != nil {
-		return fmt.Errorf("failed to create update script: %w", err)
+// validateBinary checks the file header, which catches an HTML error page or a
+// file truncated mid-header before it can be installed.
+func validateBinary(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("reading the downloaded file: %w", err)
 	}
-	defer os.Remove(tmpBatch)
+	defer f.Close()
 
-	// Run the batch script
-	cmd := exec.Command("cmd", "/c", tmpBatch)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start update: %w", err)
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(f, head); err != nil {
+		return fmt.Errorf("the downloaded file is truncated: %w", err)
 	}
-
-	// Exit the current process - the batch script will handle the rest
-	os.Exit(0)
-
+	if !hasExecutableHeader(head) {
+		return fmt.Errorf("the downloaded file is not a %s executable", runtime.GOOS)
+	}
 	return nil
+}
+
+// hasExecutableHeader reports whether head starts with a known executable magic
+// for the current platform.
+func hasExecutableHeader(head []byte) bool {
+	if len(head) < 4 {
+		return false
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		return head[0] == 'M' && head[1] == 'Z'
+
+	case "linux":
+		return bytes.HasPrefix(head, []byte{0x7F, 'E', 'L', 'F'})
+
+	case "darwin":
+		// Mach-O in either byte order, thin or universal.
+		be := uint32(head[0])<<24 | uint32(head[1])<<16 | uint32(head[2])<<8 | uint32(head[3])
+		le := uint32(head[3])<<24 | uint32(head[2])<<16 | uint32(head[1])<<8 | uint32(head[0])
+		const (
+			machO32 = 0xFEEDFACE
+			machO64 = 0xFEEDFACF
+			fat     = 0xCAFEBABE
+		)
+		for _, magic := range []uint32{be, le} {
+			if magic == machO32 || magic == machO64 || magic == fat {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Unknown platform: the size check above is all we can do.
+	return true
 }
 
 // normalizePlatform converts runtime platform string to release asset format
@@ -360,25 +429,24 @@ func matchesArch(releaseArch, runtimeArch string) bool {
 	return false
 }
 
+// progressOut is where download progress dots are written. Tests replace it to
+// keep their output clean.
+var progressOut io.Writer = os.Stdout
+
 // progressWriter provides basic download progress
 type progressWriter struct {
 	lastPrint time.Time
 	count     int64
 }
 
-func (pw progressWriter) Write(p []byte) (n int, err error) {
-	n, err = io.Discard.Write(p)
-	if err != nil {
-		return
-	}
+func (pw *progressWriter) Write(p []byte) (n int, err error) {
+	pw.count += int64(len(p))
 
-	pw.count += int64(n)
-
-	// Print progress every 500KB or 500ms
+	// Print a dot every ~500 KB or every 500 ms.
 	if pw.count >= 512000 || time.Since(pw.lastPrint) > 500*time.Millisecond {
-		fmt.Printf(".")
+		fmt.Fprint(progressOut, ".")
 		pw.count = 0
 		pw.lastPrint = time.Now()
 	}
-	return
+	return len(p), nil
 }

@@ -1,0 +1,168 @@
+Tools to interact with buzzheavier.com programmatically
+File Upload Using CURL
+
+    Anonymous file upload
+    curl -#o - -T "sample.mp4" "https://w.buzzheavier.com/sample.mp4" | cat
+    Upload a file into user directory
+    curl -#o - -T -H "Authorization: Bearer YOUR_ACCOUNT_ID" "sample.mp4" "https://w.buzzheavier.com/{parentId}/sample.mp4" | cat
+    Upload a file to a specific location
+    curl -#o - -T "sample.mp4" "https://w.buzzheavier.com/sample.mp4?locationId={locationId}" | cat
+    Upload a file with note
+    curl -#o - -T "sample.mp4" "https://w.buzzheavier.com/sample.mp4?note=$(echo -n "your_note_text" | base64)" | cat
+
+API Reference
+
+Authorization Header:Authorization: Bearer YOUR_ACCOUNT_ID
+File Upload
+Anonymous file upload
+
+Method: PUT
+
+Endpoint: https://w.buzzheavier.com/{name}
+
+Param name: file name - required, max 500 chars
+
+Description: Uploads a file to default location
+Upload a file into user directory
+
+Method: PUT
+
+Endpoint: https://w.buzzheavier.com/{parentId}/{name}
+
+Param name: file name - required, max 500 chars
+
+Param parentId: id of directory where file will be uploaded
+
+Description: Upload file into user directory
+Upload a file to specific location
+
+Method: PUT
+
+Endpoint: https://w.buzzheavier.com/{name}?locationId={locationId}
+
+Param name: file name - required, max 500 chars
+
+Param locationId: location where file will be stored - optional
+
+Description: Uploads a file to a specific storage location
+Upload a file with note
+
+Method: PUT
+
+Endpoint: https://w.buzzheavier.com/{name}?note={base64(note)}
+
+Param name: file name - required, max 500 chars
+
+Param note: base64 encoded text which will be shown under download link - optional, max 500 chars
+
+Description: Uploads a file with note
+Public APIs
+Get file storage locations
+
+Method: GET
+
+Endpoint:https://buzzheavier.com/api/locations
+
+Description: Retrieves file storage locations available to you.
+Account
+Get account information
+
+Method: GET
+
+Endpoint: https://buzzheavier.com/api/account
+
+Description: Retrieves the current authenticated account's information.
+File Manager
+Get root directory
+
+Method: GET
+
+Endpoint: https://buzzheavier.com/api/fs
+
+Description: Retrieves the contents of the root directory.
+Get directory
+
+Method: GET
+
+Endpoint: https://buzzheavier.com/api/fs/{directoryId}
+
+Description: Retrieve the contents of the specified directory.
+Create directory
+
+Method: POST
+
+Endpoint: https://buzzheavier.com/api/fs/{parentDirectoryId}
+
+Description: Create a new directory under parent directory. (To create directory under root directory, first you will need to get directoryId using "Get root directory" call.)
+
+{
+  "name": "string",               // Name of the new directory
+}
+
+Rename directory
+
+Method: PATCH
+
+Endpoint: https://buzzheavier.com/api/fs/{directoryId}
+
+Description: Renames the specified directory.
+
+{
+  "name": "string"             // New name for the directory
+}
+
+Move directory
+
+Method: PUT
+
+Endpoint: https://buzzheavier.com/api/fs/{directoryId}
+
+Description: Moves the specified directory to a new parent directory.
+
+{
+  "parentId": "string",           // DirectoryId where you want to move give directory
+}
+
+Rename File
+
+Method: PATCH
+
+Endpoint: https://buzzheavier.com/api/fs/{fileId}
+
+Description: Renames the specified file.
+
+{
+  "name": "string"             // New name for the file
+}
+
+Move file
+
+Method: PUT
+
+Endpoint: https://buzzheavier.com/api/fs/{fileId}
+
+Description: Moves the specified file to a new parent directory.
+
+{
+  "parentId": "string",           // DirectoryId where you want to move give directory
+}
+
+Add note to file
+
+Method: PUT
+
+Endpoint: https://buzzheavier.com/api/fs/{fileId}
+
+Description: Adds / changes to note of file.
+
+{
+  "note": "string",           // Note you want to add to file
+}
+
+Delete directory
+
+Method: DELETE
+
+Endpoint: https://buzzheavier.com/api/fs/{directoryId}
+
+Description: Deletes the specified directory and it's subdirectories.

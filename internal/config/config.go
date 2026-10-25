@@ -83,6 +83,13 @@ func configPath() string {
 	return filepath.Join(ConfigDir(), "config.json")
 }
 
+// Path returns the full path of the config file, whether or not it exists yet.
+// It reflects portable mode, so it follows the executable's own directory when
+// that build is used.
+func Path() string {
+	return configPath()
+}
+
 // Load reads config from disk. Returns defaults if no file exists.
 func Load() (*AppConfig, error) {
 	path := configPath()

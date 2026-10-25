@@ -1,0 +1,214 @@
+Get upload url
+
+POST https://vikingfile.com/api/get-upload-url
+
+Parameters
+
+    size (required) - size of file to upload in byte.
+
+Response
+
+{
+ 'uploadId': 'ANWA...SE1M',
+ 'key': 'rZ2h9ZqVQi',
+ 'partSize': 1073741824,
+ 'numberParts': 3,
+ 'urls': [
+            "https://upload.vikingfile.com/rZ2h9ZqVQi?partNumber=1&uploadId=ANWA...",
+            "https://upload.vikingfile.com/rZ2h9ZqVQi?partNumber=2&uploadId=ANWA...",
+            "https://upload.vikingfile.com/rZ2h9ZqVQi?partNumber=3&uploadId=ANWA..."
+         ]
+}
+
+
+
+
+
+
+Upload each part file
+
+PUT url returned by https://vikingfile.com/api/get-upload-url
+Response
+
+Get part's ETAG from headers
+
+
+
+
+
+Complete upload
+
+POST https://vikingfile.com/api/complete-upload
+
+Parameters
+
+    key (required)
+    uploadId (required)
+    parts (required) - parts[0][PartNumber]=1&parts[0][ETag]=51887c42e7e3ec990574e8fc546faae5....
+    name (required) - filename.
+    user (required) - user's hash. Empty for anonymous upload.
+    path (optional) - file path, example : Folder/My sub folder
+    pathPublicShare (optional) - path public share, example : auLXofS1Ku7SrnzA90nOz1 from https://vikingfile.com/public-upload/auLXofS1Ku7SrnzA90nOz1
+
+Response
+
+{
+ "name": "example.txt",
+ "size": 12345,
+ "hash": "TPRSfLvcIu",
+ "url": "https://vikingfile.com/f/TPRSfLvcIu"
+}
+
+
+
+
+
+
+Get upload server
+
+GET https://vikingfile.com/api/get-server
+Response
+
+{
+ "server": "https://upload.vikingfile.com"
+}
+
+
+
+
+
+
+Upload file (legacy)
+
+POST server returned by https://vikingfile.com/api/get-server
+
+Parameters
+
+    file (required)
+    user (required) - user's hash. Empty for anonymous upload.
+    path (optional) - file path, example : Folder/My sub folder
+    pathPublicShare (optional) - path public share, example : auLXofS1Ku7SrnzA90nOz1 from https://vikingfile.com/public-upload/auLXofS1Ku7SrnzA90nOz1
+
+Response
+
+{
+ "name": "example.txt",
+ "size": 12345,
+ "hash": "TPRSfLvcIu",
+ "url": "https://vikingfile.com/f/TPRSfLvcIu"
+}
+
+
+
+
+
+
+Upload remote file
+
+POST server returned by https://vikingfile.com/api/get-server
+
+Parameters
+
+    link (required)
+    user (required) - user's hash. Empty for anonymous upload.
+    name (optional) - new filename.
+    path (optional) - file path, example : Folder/My sub folder
+    pathPublicShare (optional) - path public share, example : auLXofS1Ku7SrnzA90nOz1 from https://vikingfile.com/public-upload/auLXofS1Ku7SrnzA90nOz1
+
+Response
+
+{
+ "name": "example.txt",
+ "size": 12345,
+ "hash": "TPRSfLvcIu",
+ "url": "https://vikingfile.com/f/TPRSfLvcIu"
+}
+
+
+
+
+
+
+Delete file
+
+POST https://vikingfile.com/api/delete-file
+
+Parameters
+
+    hash (required) - hash file, example : TPRSfLvcIu
+    user (required) - your user's hash
+
+Response
+
+{
+ "error": "success"
+}
+
+
+
+
+
+
+Rename file
+
+POST https://vikingfile.com/api/rename-file
+
+Parameters
+
+    hash (required) - hash file, example : TPRSfLvcIu
+    user (required) - your user's hash
+    filename (required) - new filename
+
+Response
+
+{
+ "error": "success"
+}
+
+
+
+
+
+
+Check file
+
+POST https://vikingfile.com/api/check-file
+
+Parameters
+
+    hash (required) - hash file, example : TPRSfLvcIu. Array possible ["TPRSfLvcIu", "anotherHash"]. Max 100 hashes
+
+Response
+
+{
+ "exist": true,
+ "name": "example.txt",
+ "size": 12345,
+}
+
+
+
+
+
+
+List files
+
+POST https://vikingfile.com/api/list-files
+
+Parameters
+
+    user (required) - your user's hash
+    page (required) - your current page
+    path (optional) - file path, example : Folder/My sub folder
+
+Response
+
+{
+ "currentPage": 1,
+ "maxPages": 4,
+ "files": [
+            {"hash": "TPRSfLvcIu", "name": "file.rar", "size":10000000, "downloads":0, "created": "2025-12-25 10:01"},
+            {"hash": "TPRSfLvcIv", "name": "file.png", "size":15000000, "downloads":10, "created": "2025-12-26 15:05"},
+            {"hash": "TPRSfLvcIw", "name": "file.zip", "size":19000000, "downloads":5, "created": "2025-12-27 18:39"}
+          ]
+}

@@ -4,11 +4,19 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"sync"
 )
+
+// ErrCredentialRejected reports that a service definitively refused a
+// credential — a bad key, a revoked token, or the wrong kind of account. It is
+// distinct from an inconclusive check (network failure, service down), which
+// lets the CLI refuse a bad key without blocking configuration whenever a
+// service is temporarily unreachable.
+var ErrCredentialRejected = errors.New("credential rejected")
 
 // UploadResult holds the outcome of a single upload attempt.
 type UploadResult struct {
@@ -48,6 +56,17 @@ type Uploader interface {
 	// SupportsLargeUpload returns true if the plugin handles chunked/multipart
 	// streaming (for files that shouldn't be buffered entirely in memory).
 	SupportsLargeUpload() bool
+}
+
+// CredentialVerifier is an optional interface for services that can check a
+// credential against their API before it is persisted.
+//
+// Implementations return nil when the credential works, an error wrapping
+// ErrCredentialRejected when the service refused it, and any other error when
+// the check could not be completed. Services without this interface are saved
+// unverified.
+type CredentialVerifier interface {
+	VerifyCredentials(ctx context.Context, creds Credentials, cfg Config) error
 }
 
 // Registry holds all registered service plugins.

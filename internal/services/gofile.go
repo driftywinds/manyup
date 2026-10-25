@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/driftywinds/manyup/internal/httpclient"
@@ -16,6 +17,7 @@ import (
 
 const (
 	gofileUploadURL = "https://upload.gofile.io/uploadfile"
+	gofileAPIBase   = "https://api.gofile.io"
 	gofileAPITimeout = 120 * time.Second
 )
 
@@ -28,7 +30,9 @@ func RegisterGoFile(r *plugin.Registry) {
 
 func (g *GoFile) Name() string                  { return "gofile" }
 func (g *GoFile) DisplayName() string            { return "GoFile" }
-func (g *GoFile) Description() string             { return "GoFile anonymous file hosting (unlimited size, free)" }
+func (g *GoFile) Description() string {
+	return "GoFile file hosting (multipart upload, optional token)"
+}
 func (g *GoFile) RequiredCredentials() []string   { return nil } // token is optional
 func (g *GoFile) SupportsLargeUpload() bool       { return true }
 
@@ -93,13 +97,19 @@ func (g *GoFile) Upload(
 		return nil, fmt.Errorf("gofile: reading response: %w", err)
 	}
 
+	// Check the status before parsing: a 429 or 503 usually arrives with an
+	// HTML body, and the error must still carry the code so it is retried.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, statusError("gofile", resp.StatusCode, respBody)
+	}
+
 	var apiResp gofileUploadResponse
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, fmt.Errorf("gofile: parsing response: %w", err)
+		return nil, fmt.Errorf("gofile: parsing response: %w (body: %s)", err, describeBody(respBody))
 	}
 
 	if apiResp.Status != "ok" {
-		return nil, fmt.Errorf("gofile: API error: %s", apiResp.Status)
+		return nil, fmt.Errorf("gofile: API error %q: %s", apiResp.Status, describeBody(respBody))
 	}
 
 	if apiResp.Data == nil {
@@ -123,6 +133,22 @@ func (g *GoFile) Upload(
 	}
 
 	return result, nil
+}
+
+// VerifyCredentials resolves the token to an account via the documented
+// /accounts/getid endpoint, which answers 401 {"status":"error-token"} for a
+// token it does not recognise.
+func (g *GoFile) VerifyCredentials(ctx context.Context, creds plugin.Credentials, cfg plugin.Config) error {
+	token := strings.TrimSpace(creds["API_TOKEN"])
+	if token == "" {
+		return fmt.Errorf("gofile: %w: API_TOKEN is empty", plugin.ErrCredentialRejected)
+	}
+
+	status, body, err := authGet(ctx, gofileAPIBase+"/accounts/getid", "Authorization", "Bearer "+token)
+	if err != nil {
+		return fmt.Errorf("gofile: could not verify: %w", err)
+	}
+	return authCheckOutcome("gofile", status, body)
 }
 
 // buildMultipartBody creates a streaming multipart body from a file reader.

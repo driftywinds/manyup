@@ -10,6 +10,8 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 - **Parallel or sequential** — upload to all selected services at once, or one at a time
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
 - **Plugin architecture** — add new hosting services by implementing a single Go interface
+- **Validated credentials** — a token is checked against the service before it is saved, so typos never make it to disk
+- **Shell completion** — tab-complete service names and subcommands in bash, zsh, fish and PowerShell
 - **Streaming uploads** — files are streamed, never buffered entirely in memory. Uploads multi-gigabyte files with minimal RAM usage
 - **Automatic retries** — transient failures (dropped connections, timeouts, rate limits, 5xx responses) are retried per service with exponential backoff, while permanent errors fail fast
 - **Resilient** — missing credentials skip a service with a warning instead of blocking everything
@@ -25,22 +27,103 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 | [DataNodes](https://datanodes.to) | **Required** (API_TOKEN) | Two-step multipart POST | 3 GB free / unlimited premium |
 | [GoFile](https://gofile.io) | Optional (API_TOKEN) | Multipart POST | Unlimited |
 | [Mocha](https://mocha.my) | **Required** (API_TOKEN) | Multipart presigned PUT | 20 GiB per file |
-| [PixelDrain](https://pixeldrain.com) | Optional (API_TOKEN) | Raw PUT | Plan-dependent |
+| [PixelDrain](https://pixeldrain.com) | **Required** (API_TOKEN) | Raw PUT | Plan-dependent |
 | [VikingFile](https://vikingfile.com) | Optional (API_TOKEN) | Streaming multipart | Unlimited |
 | [ZincDrive](https://zincdrive.com) | **Required** (API_TOKEN) | S3 presigned PUT | 10 GB |
 
 ## Installation
 
-### Download
+### Windows — installer script
 
-Grab the latest binary for your platform from [Releases](https://github.com/multiuploader/manyup/releases).
+The script downloads the latest release into `%LOCALAPPDATA%\Programs\manyup`, adds that
+folder to your **user** PATH, and prints the result. No Go toolchain and no admin rights
+are needed.
+
+From a clone:
+
+```powershell
+.\scripts\install.ps1
+```
+
+Or without cloning anything:
+
+```powershell
+irm https://raw.githubusercontent.com/driftywinds/manyup/main/scripts/install.ps1 | iex
+```
+
+Useful switches:
+
+| Switch | Effect |
+|---|---|
+| `-Completion` | Also enable tab completion in your PowerShell profile |
+| `-Version v0.2.7` | Install a specific release instead of the latest |
+| `-InstallDir <path>` | Install somewhere else |
+| `-SkipPath` | Install the binary but leave PATH alone |
+| `-Force` | Skip the "replacing existing install" notice |
+
+Open a **new** terminal afterwards — PATH changes never reach shells that are already open.
+
+### Download a binary manually
+
+Grab `manyup-<os>-<arch>` (`.exe` on Windows) from
+[Releases](https://github.com/driftywinds/manyup/releases) and put it in a folder that
+stays put, such as `%LOCALAPPDATA%\Programs\manyup` on Windows or `~/.local/bin` on
+macOS/Linux.
+
+Don't run it from inside a clone: `go build` overwrites the binary in the repo root.
+
+### Add manyup to PATH
+
+Only needed if you installed the binary manually. Adding a folder to PATH is what makes
+`manyup` work from any directory; it also lets tab completion find the binary.
+
+Windows (PowerShell) — adds to your user PATH, no admin required, and is safe to run
+twice:
+
+```powershell
+$dir = "$env:LOCALAPPDATA\Programs\manyup"
+
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $dir) {
+    [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User')
+    Write-Host "Added to PATH: $dir"
+}
+
+# make it work in this window too
+$env:Path += ";$dir"
+```
+
+macOS / Linux:
+
+```bash
+# add to ~/.bashrc or ~/.zshrc
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Avoid `setx` on Windows: it truncates PATH at 1024 characters. Prefer
+`[Environment]::SetEnvironmentVariable`, as above.
+
+### Verify the install
+
+```bash
+manyup where
+```
+
+```
+manyup 0.2.7
+  binary:  C:\Users\you\AppData\Local\Programs\manyup\manyup.exe
+  config:  C:\Users\you\AppData\Roaming\manyup\config.json
+  on PATH: yes
+```
+
+If `on PATH` says no, the block above tells you which folder to add.
 
 ### Build from source
 
-Requires [Go 1.21+](https://go.dev/dl/).
+Requires Go 1.27+ (the version pinned in `go.mod`).
 
 ```bash
-git clone https://github.com/multiuploader/manyup.git
+git clone https://github.com/driftywinds/manyup.git
 cd manyup
 go build -o manyup .
 ```
@@ -57,14 +140,43 @@ manyup <command> [options]
 |---|---|
 | `manyup upload <file> [file...]` | Upload file(s) to selected services |
 | `manyup services` | List available service plugins |
-| `manyup config set <service> <key> <value>` | Set a credential for a service |
+| `manyup config set <service> <value>` | Set the API token (key defaults to `API_TOKEN`) |
+| `manyup config set <service> <key> <value>` | Set any credential explicitly |
 | `manyup config show` | Show current configuration |
 | `manyup config mode <parallel\|sequential>` | Set upload mode |
 | `manyup config select <service>` | Toggle a service on/off |
 | `manyup config retry <max> [seconds]` | Set retries per service and base backoff delay |
+| `manyup completion <shell>` | Print a tab-completion script |
+| `manyup where` | Show the binary path, config path, and whether it is on PATH |
 | `manyup version` | Print version |
-| `manyup update` / `manyup -U` | Check for and apply updates |
+| `manyup update` / `manyup -U` | Replace the current binary with the latest release |
 | `manyup help` | Show usage |
+
+### Updating
+
+`manyup -U` downloads the latest release and replaces the running binary in place:
+
+```
+$ manyup -U
+Checking for updates...
+Current version: 0.1.0
+Latest version:  v0.2.7
+Platform:        windows-amd64
+
+Downloading v0.2.7...
+...............
+
+✓ Updated to v0.2.7. The next time you run manyup it will be the new version.
+```
+
+The swap happens inside the install folder, so it is a rename rather than a copy. On
+Windows the running image is renamed to `manyup.exe.old` (a running executable can be
+renamed but not overwritten) and removed automatically on the next start. If anything goes
+wrong — unwritable install folder, truncated download, a file that is not an executable —
+the update fails with a clear message and the existing binary is left untouched.
+
+Builds from source carry whatever version is compiled in. If that is not `X.Y.Z`, the
+update treats it as older than any release and proceeds.
 
 ### Quick start
 
@@ -82,30 +194,113 @@ manyup upload myfile.zip
 
 ### Configure credentials
 
-Only needed for services that require authentication (currently DataNodes, Mocha and ZincDrive):
+Only needed for services that require authentication (currently DataNodes, Mocha, PixelDrain and ZincDrive):
 
 ```bash
-# DataNodes (required)
-manyup config set datanodes API_TOKEN your_api_key_here
+# The credential key defaults to API_TOKEN — this is the short form
+manyup config set mocha mocha_xxxxxxxxxxxxxxxxx
 
-# Mocha (required — create a key at https://mocha.my/api-keys)
-manyup config set mocha API_TOKEN mocha_xxxxxxxxxxxxxxxxx
+# DataNodes (required)
+manyup config set datanodes your_api_key_here
 
 # ZincDrive (required)
-manyup config set zincdrive API_TOKEN your_api_key_here
+manyup config set zincdrive your_api_key_here
 
 # GoFile (optional — works anonymous, but token ties uploads to your account)
-manyup config set gofile API_TOKEN your_gofile_token
+manyup config set gofile your_gofile_token
 
-# PixelDrain (optional — anonymous works, but token increases limits)
-manyup config set pixeldrain API_TOKEN your_pixeldrain_api_key
+# PixelDrain (required — uploads are rejected without a key)
+manyup config set pixeldrain your_pixeldrain_api_key
 
 # BuzzHeavier (optional — works anonymous)
-manyup config set buzzheavier API_TOKEN your_account_id
+manyup config set buzzheavier your_account_id
 
 # VikingFile (optional — works anonymous)
-manyup config set vikingfile API_TOKEN your_user_hash
+manyup config set vikingfile your_user_hash
+
+# Explicit form, for any other credential key
+manyup config set gofile API_TOKEN your_gofile_token
 ```
+
+**Credentials are verified before they are saved.** `config set` calls the service's own
+account endpoint with the token it was given, and a token the service rejects is never
+written to disk:
+
+```
+$ manyup config set mocha mocha_typo
+✗ mocha: credential rejected: {"error":"Unauthorized"}
+Credential was not saved.
+
+$ manyup config set mocha mocha_correct
+✓ Set mocha/API_TOKEN (verified)
+```
+
+Services with a known check: Mocha, GoFile, DataNodes, ZincDrive, BuzzHeavier, PixelDrain.
+If the service cannot be reached the token is saved with a warning instead, so a temporary
+outage never blocks configuration; VikingFile has no account endpoint, so its token is
+always saved unverified.
+
+### Tab completion
+
+Completion is generated by the binary, so it always matches the registered services. Add
+one line to your shell profile and restart the shell:
+
+```bash
+# bash (~/.bashrc)
+eval "$(manyup completion bash)"
+
+# zsh (~/.zshrc)
+eval "$(manyup completion zsh)"
+
+# fish (~/.config/fish/config.fish)
+manyup completion fish | source
+```
+
+```powershell
+# PowerShell — add to $PROFILE
+manyup completion powershell | Out-String | Invoke-Expression
+```
+
+Then `manyup config set <TAB>` cycles through every service, and `manyup config <TAB>`
+lists the subcommands:
+
+```
+$ manyup config set <TAB>
+0x0  buzzheavier  datanodes  gofile  mocha  pixeldrain  vikingfile  zincdrive
+```
+
+#### cmd.exe
+
+`cmd.exe` has no completion mechanism of its own — not even for filenames — so manyup
+cannot hook into it directly. The only way to get tab completion inside `cmd` is
+[Clink](https://github.com/chrisant996/clink), which replaces the cmd prompt with a
+readline-style editor:
+
+```cmd
+winget install --id chrisant996.Clink -e
+```
+
+Then install the completion script:
+
+```cmd
+if not exist "%LOCALAPPDATA%\clink" mkdir "%LOCALAPPDATA%\clink"
+manyup completion clink > "%LOCALAPPDATA%\clink\manyup.lua"
+```
+
+The script calls `manyup` by name, so **manyup must be on your PATH** — otherwise Tab
+silently falls back to file completion. Confirm with `where manyup`.
+
+Open a new `cmd` window, or press <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>Ctrl</kbd>+<kbd>R</kbd>
+to reload scripts. `clink info` prints the version, profile directory and the script
+directories Clink actually reads; if `clink info` itself is not recognised, Clink is not
+injected into that `cmd` window (run `clink autorun install`).
+
+Alternatively, skip `cmd` entirely: the bash script works in **Git Bash** (which ships with
+Git for Windows), and the PowerShell script works in Windows Terminal.
+
+> Tab completion is shell-side by design: `manyup completion <shell>` prints a script, and
+> nothing happens until that script is loaded into your shell. A program cannot register a
+> handler inside the shell that launched it.
 
 ### Upload multiple files
 
@@ -174,6 +369,8 @@ Each wait doubles per attempt and is capped at 30 seconds. Retries can also be s
 manyup/
 ├── main.go                          # CLI entry point + progress display
 ├── api-refs/                        # Offline HTTP API references for every service
+├── scripts/
+│   └── install.ps1                  # Windows installer (latest release + PATH)
 ├── internal/
 │   ├── httpclient/
 │   │   └── httpclient.go            # Shared tuned HTTP client (256KB buffers, connection pooling)
@@ -187,6 +384,7 @@ manyup/
 │   │   └── retry.go                 # Transient-failure classification + backoff
 │   └── services/
 │       ├── registry.go              # Central service registration
+│       ├── verify.go                # Shared credential-check helpers
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
 │       ├── datanodes.go             # DataNodes plugin (two-step multipart API)
 │       ├── gofile.go                # GoFile plugin (multipart upload)
@@ -206,6 +404,8 @@ plugin streams the file.
 1. Create `internal/services/yourservice.go`
 2. Implement the `plugin.Uploader` interface (6 methods)
 3. Register it in `internal/services/registry.go`
+4. Optionally implement `plugin.CredentialVerifier` so `manyup config set` can validate
+   the token against the service before saving it
 
 ```go
 type Uploader interface {

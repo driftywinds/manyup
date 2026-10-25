@@ -192,6 +192,20 @@ func (m *Mocha) Upload(
 	}, nil
 }
 
+// VerifyCredentials checks an API key against the account endpoint.
+func (m *Mocha) VerifyCredentials(ctx context.Context, creds plugin.Credentials, cfg plugin.Config) error {
+	apiKey := strings.TrimSpace(creds["API_TOKEN"])
+	if apiKey == "" {
+		return fmt.Errorf("mocha: %w: API_TOKEN is empty", plugin.ErrCredentialRejected)
+	}
+
+	status, body, err := authGet(ctx, mochaAPIBase+"/api/profile/summary", "Authorization", "Bearer "+apiKey)
+	if err != nil {
+		return fmt.Errorf("mocha: could not verify: %w", err)
+	}
+	return authCheckOutcome("mocha", status, body)
+}
+
 // initUpload opens a multipart session and reports how to split the file.
 func (m *Mocha) initUpload(
 	ctx context.Context,
@@ -272,7 +286,7 @@ func (m *Mocha) uploadPresigned(
 			return nil, fmt.Errorf("mocha: part %d: no upload URL returned", partNumber)
 		}
 
-		chunk := mochaChunkSize(size, partSize, partNumber)
+		chunk := chunkSize(size, partSize, partNumber)
 		etag, err := m.putPart(ctx, partURL, reader, chunk, partNumber)
 		if err != nil {
 			return nil, err
@@ -378,7 +392,7 @@ func (m *Mocha) uploadRelay(
 	parts := make([]mochaCompletedPart, 0, total)
 
 	for partNumber := 1; partNumber <= total; partNumber++ {
-		chunk := mochaChunkSize(size, partSize, partNumber)
+		chunk := chunkSize(size, partSize, partNumber)
 
 		query := url.Values{}
 		query.Set("uploadId", init.UploadID)
@@ -595,8 +609,8 @@ func mochaDescribe(body []byte) string {
 	return trimmed
 }
 
-// mochaChunkSize returns the byte length of one part, truncating the last one.
-func mochaChunkSize(size, partSize int64, partNumber int) int64 {
+// chunkSize returns the byte length of one part, truncating the last one.
+func chunkSize(size, partSize int64, partNumber int) int64 {
 	remaining := size - int64(partNumber-1)*partSize
 	if remaining < partSize {
 		return remaining
