@@ -6,7 +6,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 ## Features
 
-- **Multi-service uploads** — BuzzHeavier, DataNodes, GoFile, PixelDrain, VikingFile, ZincDrive, and 0x0.st out of the box
+- **Multi-service uploads** — BuzzHeavier, DataNodes, GoFile, Mocha, PixelDrain, VikingFile, ZincDrive, and 0x0.st out of the box
 - **Parallel or sequential** — upload to all selected services at once, or one at a time
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
 - **Plugin architecture** — add new hosting services by implementing a single Go interface
@@ -24,6 +24,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 | [BuzzHeavier](https://buzzheavier.com) | Optional (API_TOKEN) | Raw PUT | Unlimited |
 | [DataNodes](https://datanodes.to) | **Required** (API_TOKEN) | Two-step multipart POST | 3 GB free / unlimited premium |
 | [GoFile](https://gofile.io) | Optional (API_TOKEN) | Multipart POST | Unlimited |
+| [Mocha](https://mocha.my) | **Required** (API_TOKEN) | Multipart presigned PUT | 20 GiB per file |
 | [PixelDrain](https://pixeldrain.com) | Optional (API_TOKEN) | Raw PUT | Plan-dependent |
 | [VikingFile](https://vikingfile.com) | Optional (API_TOKEN) | Streaming multipart | Unlimited |
 | [ZincDrive](https://zincdrive.com) | **Required** (API_TOKEN) | S3 presigned PUT | 10 GB |
@@ -81,11 +82,14 @@ manyup upload myfile.zip
 
 ### Configure credentials
 
-Only needed for services that require authentication (currently DataNodes and ZincDrive):
+Only needed for services that require authentication (currently DataNodes, Mocha and ZincDrive):
 
 ```bash
 # DataNodes (required)
 manyup config set datanodes API_TOKEN your_api_key_here
+
+# Mocha (required — create a key at https://mocha.my/api-keys)
+manyup config set mocha API_TOKEN mocha_xxxxxxxxxxxxxxxxx
 
 # ZincDrive (required)
 manyup config set zincdrive API_TOKEN your_api_key_here
@@ -138,6 +142,7 @@ Credentials can also be set via environment variables instead of the config file
 
 ```bash
 export MANYUP_DATANODES_API_TOKEN=your_key
+export MANYUP_MOCHA_API_TOKEN=mocha_xxxxxxxxxxxxxxxxx
 export MANYUP_ZINCDRIVE_API_TOKEN=your_key
 export MANYUP_GOFILE_API_TOKEN=your_token
 export MANYUP_PIXELDRAIN_API_TOKEN=your_token
@@ -168,6 +173,7 @@ Each wait doubles per attempt and is capped at 30 seconds. Retries can also be s
 ```
 manyup/
 ├── main.go                          # CLI entry point + progress display
+├── api-refs/                        # Offline HTTP API references for every service
 ├── internal/
 │   ├── httpclient/
 │   │   └── httpclient.go            # Shared tuned HTTP client (256KB buffers, connection pooling)
@@ -176,18 +182,24 @@ manyup/
 │   ├── config/
 │   │   └── config.go                # JSON config, API keys, service selection
 │   ├── uploader/
-│   │   ├── uploader.go              # Upload orchestrator (parallel/sequential)
-│   │   └── progress_reader.go       # Streaming progress tracking with smoothed speed
+│   │   ├── uploader.go              # Upload orchestration (parallel/sequential)
+│   │   ├── progress_reader.go       # Streaming progress tracking with smoothed speed
+│   │   └── retry.go                 # Transient-failure classification + backoff
 │   └── services/
 │       ├── registry.go              # Central service registration
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
 │       ├── datanodes.go             # DataNodes plugin (two-step multipart API)
 │       ├── gofile.go                # GoFile plugin (multipart upload)
+│       ├── mocha.go                 # Mocha plugin (multipart presigned + share link)
 │       ├── 0x0.go                   # 0x0.st plugin (multipart POST upload)
 │       ├── pixeldrain.go            # PixelDrain plugin (PUT upload)
 │       ├── vikingfile.go            # VikingFile plugin (legacy + chunked fallback)
 │       └── zincdrive.go             # ZincDrive plugin (S3 presigned upload)
 ```
+
+Each plugin's HTTP contract is documented in [`api-refs/`](api-refs/README.md) — one file
+per service, covering auth, endpoints, request/response bodies, error codes and how the
+plugin streams the file.
 
 ### Adding a new service
 
