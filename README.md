@@ -435,4 +435,9 @@ go run . config show
 
 ## License
 
-MIT
+manyup is licensed under the [GNU Affero General Public License v3.0](LICENSE)
+(AGPL-3.0). See [LICENSE](LICENSE) for the full text.
+
+AGPL is a strong copyleft license. In addition to the usual distribution terms, §13
+requires that anyone who runs a modified version as a network service offers the
+corresponding source to that service's users.
