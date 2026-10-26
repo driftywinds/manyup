@@ -66,7 +66,20 @@ func TestParseSetArgs(t *testing.T) {
 			wantKey:     "path",
 			wantValue:   "/uploads/",
 		},
-		{name: "missing value", args: []string{"mocha"}, wantErr: true},
+		{
+			name:        "service only means prompt",
+			args:        []string{"storageto"},
+			wantService: "storageto",
+			wantKey:     "API_TOKEN",
+			wantValue:   "",
+		},
+		{
+			name:        "value with shell metacharacters is kept intact",
+			args:        []string{"storageto", "896|UIVJ5F3mMOmetvdGT7BZat8PGCmtXeYDU5xJqgS7"},
+			wantService: "storageto",
+			wantKey:     "API_TOKEN",
+			wantValue:   "896|UIVJ5F3mMOmetvdGT7BZat8PGCmtXeYDU5xJqgS7",
+		},
 		{name: "no arguments", args: nil, wantErr: true},
 		{name: "empty value", args: []string{"mocha", ""}, wantErr: true},
 		{name: "empty explicit value", args: []string{"mocha", "API_TOKEN", ""}, wantErr: true},
@@ -88,6 +101,44 @@ func TestParseSetArgs(t *testing.T) {
 			if service != c.wantService || key != c.wantKey || value != c.wantValue {
 				t.Errorf("parseSetArgs(%q) = (%q, %q, %q), want (%q, %q, %q)",
 					c.args, service, key, value, c.wantService, c.wantKey, c.wantValue)
+			}
+		})
+	}
+}
+
+func TestReadSecretValue(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "keeps shell metacharacters",
+			input: "896|UIVJ5F3mMOmetvdGT7BZat8PGCmtXeYDU5xJqgS7\n",
+			want:  "896|UIVJ5F3mMOmetvdGT7BZat8PGCmtXeYDU5xJqgS7",
+		},
+		{name: "strips CRLF", input: "token123\r\n", want: "token123"},
+		{name: "keeps ampersands and carets", input: "a&b^c>d<e\n", want: "a&b^c>d<e"},
+		{name: "no trailing newline", input: "token456", want: "token456"},
+		{name: "empty input", input: "\n", wantErr: true},
+		{name: "no input", input: "", wantErr: true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := readSecretValue(strings.NewReader(c.input))
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("readSecretValue(%q) returned %q, want an error", c.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readSecretValue(%q) returned %v", c.input, err)
+			}
+			if got != c.want {
+				t.Errorf("readSecretValue(%q) = %q, want %q", c.input, got, c.want)
 			}
 		})
 	}

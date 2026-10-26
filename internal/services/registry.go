@@ -21,6 +21,7 @@ func All() *plugin.Registry {
 	RegisterDataNodes(r)
 	RegisterFuckingFast(r)
 	RegisterGoFile(r)
+	RegisterInterim(r)
 	RegisterMocha(r)
 	RegisterZeroXZero(r)
 	RegisterPixelDrain(r)

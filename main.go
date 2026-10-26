@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -81,6 +82,7 @@ COMMANDS:
   upload <file> [file...]     Upload file(s) to selected services
   services                    List available service plugins
   config menu                 Interactive service selector
+  config set <service>                 Prompt for the API token (quote-free, any characters)
   config set <service> <value>         Set the API token (key defaults to API_TOKEN)
   config set <service> <key> <value>   Set any credential explicitly
   config show                 Show current configuration
@@ -269,6 +271,18 @@ func cmdConfig() {
 			os.Exit(1)
 		}
 
+		// No value on the command line, or "-": read it from stdin. Tokens often
+		// contain characters the shell eats (| & < > ^), and those never reach
+		// us at all when they are part of an argument.
+		if value == "" || value == "-" {
+			fmt.Printf("Paste the %s for %s and press Enter:\n> ", key, svc.DisplayName())
+			value, err = readSecretValue(os.Stdin)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		// Check the credential first: a token the service refuses is a typo,
 		// and persisting it would only postpone the failure to upload time.
 		note, verifyErr := authenticateCredential(svc, key, value)
@@ -378,6 +392,7 @@ func printConfigUsage() {
 
 Commands:
   menu                        Interactive service selector
+  set <service>               Prompt for the token (safe for any characters)
   set <service> <value>       Set the API token (key defaults to API_TOKEN)
   set <service> <key> <value> Set any credential explicitly
   show                        Show current configuration
@@ -386,32 +401,62 @@ Commands:
   retry <max> [seconds]       Retries per service + base backoff delay (0 disables)
 
 Credentials are checked against the service before they are saved.
+
+If a token contains shell characters such as | & < > ^, quote it or omit the
+value and paste it at the prompt — the shell strips those before manyup runs.
 `)
 }
 
-// parseSetArgs accepts both forms of `config set`:
+// parseSetArgs accepts three forms of `config set`:
 //
+//	manyup config set <service>                  value is prompted for
 //	manyup config set <service> <value>          key defaults to API_TOKEN
 //	manyup config set <service> <key> <value>
+//
+// A value of "" is returned when it was omitted, so the caller can read it from
+// stdin; an explicitly empty argument is still an error.
 func parseSetArgs(args []string) (service, key, value string, err error) {
 	switch {
-	case len(args) < 2:
-		return "", "", "", errors.New("missing service and value")
+	case len(args) < 1:
+		return "", "", "", errors.New("missing service")
 	case len(args) > 3:
 		return "", "", "", errors.New("too many arguments")
 	}
 
 	service = args[0]
-	if len(args) == 2 {
+	switch len(args) {
+	case 1:
+		key = "API_TOKEN" // value will be prompted for
+	case 2:
 		key, value = "API_TOKEN", args[1]
-	} else {
+	default:
 		key, value = args[1], args[2]
 	}
 
-	if value == "" {
+	if len(args) >= 2 && value == "" {
 		return "", "", "", fmt.Errorf("the value for %s/%s cannot be empty", service, key)
 	}
 	return service, key, value, nil
+}
+
+// readSecretValue reads one line from r. It is used when a credential is typed
+// at a prompt instead of passed as an argument: values such as API tokens often
+// contain characters the shell would consume (| & < > ^), and those never reach
+// the process at all when they are part of a command-line argument.
+func readSecretValue(r io.Reader) (string, error) {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && line == "" {
+		if errors.Is(err, io.EOF) {
+			return "", errors.New("no value provided")
+		}
+		return "", fmt.Errorf("reading input: %w", err)
+	}
+
+	value := strings.TrimSpace(line)
+	if value == "" {
+		return "", errors.New("no value provided")
+	}
+	return value, nil
 }
 
 // isCredentialKey reports whether a config key identifies the caller to a
