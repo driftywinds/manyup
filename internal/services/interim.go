@@ -21,9 +21,9 @@ import (
 var interimBaseURL = "https://interim.drifty.win/api/v1"
 
 const (
-	// interimSinglePutLimit is the largest object an interim instance accepts
-	// in one PUT. The API caps a single-request upload at 5 GiB.
-	interimSinglePutLimit int64 = 5 << 30
+	// interimPartBatch is the largest number of part URLs the API signs in one
+	// request.
+	interimPartBatch = 100
 
 	// interimNameLimit is the maximum length, in characters, of the file name
 	// an upload intent accepts.
@@ -37,6 +37,11 @@ const (
 	interimAbortTimeout = 10 * time.Second
 )
 
+const (
+	interimModeSingle    = "single"
+	interimModeMultipart = "multipart"
+)
+
 // interimCompleteRetryDelay is the base pause between completion attempts. It
 // is a variable so tests can shrink the wait.
 var interimCompleteRetryDelay = 500 * time.Millisecond
@@ -44,10 +49,12 @@ var interimCompleteRetryDelay = 500 * time.Millisecond
 // Interim uploads files to interim.drifty.win, a temporary file host built
 // around direct-to-S3 uploads.
 //
-// An upload intent reserves quota and returns a presigned PUT URL; the bytes go
-// straight from this machine to storage, and a completion call commits the file
-// record. The plugin always sends an admin-approved user hash, which an instance
-// with public uploads disabled requires.
+// An upload intent reserves quota and either returns a presigned PUT URL for a
+// single request or, for larger files, opens an S3 multipart session whose parts
+// are uploaded and reported individually. The bytes go straight from this
+// machine to storage, and a completion call commits the file record. The plugin
+// always sends a user hash, which an instance with public uploads disabled
+// requires to be approved.
 //
 // See api-refs/interim.md for the full contract.
 type Interim struct{}
@@ -59,7 +66,7 @@ func RegisterInterim(r *plugin.Registry) {
 func (i *Interim) Name() string        { return "interim" }
 func (i *Interim) DisplayName() string { return "interim" }
 func (i *Interim) Description() string {
-	return "interim temporary file hosting (approved user hash, presigned S3 PUT)"
+	return "interim temporary file hosting (user hash, single or multipart S3 upload)"
 }
 
 // RequiredCredentials reports the user hash as mandatory: the plugin always
@@ -75,13 +82,30 @@ func (i *Interim) SupportsLargeUpload() bool { return true }
 // acts on are decoded.
 type interimIntent struct {
 	UploadID    string            `json:"upload_id"`
+	Mode        string            `json:"mode"`
 	URL         string            `json:"url"`
 	Method      string            `json:"method"`
 	Headers     map[string]string `json:"headers"`
+	PartSize    int64             `json:"part_size"`
+	PartCount   int               `json:"part_count"`
+	PartsURL    string            `json:"parts_url"`
+	StatusURL   string            `json:"status_url"`
+	Concurrency int               `json:"concurrency"`
 	UploadToken string            `json:"upload_token"`
 	CompleteURL string            `json:"complete_url"`
 	AbortURL    string            `json:"abort_url"`
 	DeleteToken string            `json:"delete_token"`
+}
+
+// interimPartURL is one presigned URL from POST /uploads/{id}/parts.
+type interimPartURL struct {
+	PartNumber int    `json:"part_number"`
+	URL        string `json:"url"`
+}
+
+// interimPartsResponse is the response of POST /uploads/{id}/parts.
+type interimPartsResponse struct {
+	Parts []interimPartURL `json:"parts"`
 }
 
 // interimFile is the file record returned by completion.
@@ -105,6 +129,11 @@ type interimKeyInfo struct {
 	Approved  bool   `json:"approved"`
 }
 
+// interimStatus is the subset of GET /status the credential check needs.
+type interimStatus struct {
+	PublicUploads bool `json:"public_uploads"`
+}
+
 // interimError is the API's single error envelope.
 type interimError struct {
 	Error struct {
@@ -125,16 +154,12 @@ func (i *Interim) Upload(
 ) (*plugin.UploadResult, error) {
 	userHash := strings.TrimSpace(creds["API_TOKEN"])
 	if userHash == "" {
-		return nil, fmt.Errorf("interim: API_TOKEN required (an admin-approved user hash)")
+		return nil, fmt.Errorf("interim: API_TOKEN required (a user hash)")
 	}
 	if size <= 0 {
 		// The API accepts only objects with at least one byte, so an empty
 		// file can never be completed.
 		return nil, fmt.Errorf("interim: cannot upload an empty file")
-	}
-	if size > interimSinglePutLimit {
-		return nil, fmt.Errorf("interim: file is %d bytes, above the %d-byte single-PUT limit",
-			size, interimSinglePutLimit)
 	}
 
 	name := interimFileName(filename)
@@ -155,8 +180,17 @@ func (i *Interim) Upload(
 		}
 	}()
 
-	if err := i.putObject(ctx, intent, reader, size, contentType); err != nil {
-		return nil, fmt.Errorf("interim: upload: %w", err)
+	// The server chooses the transport: one presigned PUT for small files, or
+	// an S3 multipart session above its configured threshold.
+	switch intent.Mode {
+	case interimModeMultipart:
+		if err := i.uploadMultipart(ctx, intent, reader, size); err != nil {
+			return nil, fmt.Errorf("interim: multipart upload: %w", err)
+		}
+	default:
+		if err := i.putObject(ctx, intent, reader, size, contentType); err != nil {
+			return nil, fmt.Errorf("interim: upload: %w", err)
+		}
 	}
 
 	file, err := i.complete(ctx, intent)
@@ -203,14 +237,37 @@ func (i *Interim) createIntent(
 	if err := json.Unmarshal(body, &intent); err != nil {
 		return nil, fmt.Errorf("interim: parsing intent: %w (body: %s)", err, describeBody(body))
 	}
-	if intent.URL == "" || intent.UploadToken == "" {
-		return nil, fmt.Errorf("interim: incomplete intent response: %s", describeBody(body))
+	if intent.UploadToken == "" {
+		return nil, fmt.Errorf("interim: intent has no upload token: %s", describeBody(body))
 	}
-	if intent.Method == "" {
-		intent.Method = http.MethodPut
+	if intent.Mode == "" {
+		// Older responses predate the mode field and always carried a single
+		// PUT URL.
+		intent.Mode = interimModeSingle
 	}
 	if intent.CompleteURL == "" && intent.UploadID != "" {
 		intent.CompleteURL = interimBaseURL + "/uploads/" + url.PathEscape(intent.UploadID) + "/complete"
+	}
+
+	switch intent.Mode {
+	case interimModeSingle:
+		if intent.URL == "" {
+			return nil, fmt.Errorf("interim: single-mode intent has no PUT URL: %s", describeBody(body))
+		}
+		if intent.Method == "" {
+			intent.Method = http.MethodPut
+		}
+	case interimModeMultipart:
+		if intent.PartsURL == "" && intent.UploadID != "" {
+			intent.PartsURL = interimBaseURL + "/uploads/" + url.PathEscape(intent.UploadID) + "/parts"
+		}
+		if intent.PartSize <= 0 || intent.PartCount <= 0 || intent.PartsURL == "" {
+			return nil, fmt.Errorf(
+				"interim: incomplete multipart intent (part_size=%d, part_count=%d, parts_url=%q): %s",
+				intent.PartSize, intent.PartCount, intent.PartsURL, describeBody(body))
+		}
+	default:
+		return nil, fmt.Errorf("interim: unsupported upload mode %q", intent.Mode)
 	}
 
 	return &intent, nil
@@ -241,10 +298,7 @@ func (i *Interim) putObject(
 	// The shared client caps a request at five minutes, which a multi-gigabyte
 	// single PUT can exceed. Keep its transport but drop the overall timeout;
 	// context cancellation still aborts the transfer.
-	client := *httpclient.Get()
-	client.Timeout = 0
-
-	resp, err := client.Do(req)
+	resp, err := interimStreamingClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -257,9 +311,176 @@ func (i *Interim) putObject(
 	return nil
 }
 
+// uploadMultipart streams a file as provider-sized parts. Part URLs are signed
+// in batches (the API signs at most 100 at a time), each part is PUT straight to
+// storage, and its ETag and exact size are reported before the next part.
+//
+// Parts are uploaded sequentially because the uploader hands the plugin one
+// forward-only reader; the API's suggested browser parallelism is not used.
+func (i *Interim) uploadMultipart(
+	ctx context.Context,
+	intent *interimIntent,
+	reader io.Reader,
+	size int64,
+) error {
+	expectedParts := (size + intent.PartSize - 1) / intent.PartSize
+	if expectedParts != int64(intent.PartCount) {
+		return fmt.Errorf("server declared %d parts of %d bytes for a %d-byte file (expected %d)",
+			intent.PartCount, intent.PartSize, size, expectedParts)
+	}
+
+	for first := 1; first <= intent.PartCount; first += interimPartBatch {
+		last := first + interimPartBatch - 1
+		if last > intent.PartCount {
+			last = intent.PartCount
+		}
+
+		numbers := make([]int, 0, last-first+1)
+		for number := first; number <= last; number++ {
+			numbers = append(numbers, number)
+		}
+
+		urls, err := i.requestPartURLs(ctx, intent, numbers)
+		if err != nil {
+			return err
+		}
+
+		byNumber := make(map[int]string, len(urls))
+		for _, part := range urls {
+			if part.PartNumber >= 1 && part.URL != "" {
+				byNumber[part.PartNumber] = part.URL
+			}
+		}
+
+		for number := first; number <= last; number++ {
+			partURL, ok := byNumber[number]
+			if !ok {
+				return fmt.Errorf("no URL returned for part %d", number)
+			}
+
+			length := interimPartLength(size, intent.PartSize, number, intent.PartCount)
+			if length <= 0 || length > intent.PartSize {
+				return fmt.Errorf("part %d has invalid length %d (part_size %d)",
+					number, length, intent.PartSize)
+			}
+
+			etag, err := i.putPart(ctx, partURL, reader, length, number)
+			if err != nil {
+				return err
+			}
+			if err := i.reportPart(ctx, intent, number, etag, length); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// requestPartURLs asks the API for presigned URLs for one batch of parts.
+func (i *Interim) requestPartURLs(
+	ctx context.Context,
+	intent *interimIntent,
+	numbers []int,
+) ([]interimPartURL, error) {
+	status, body, err := interimRequest(ctx, http.MethodPost, intent.PartsURL, "", intent.UploadToken,
+		map[string]any{"part_numbers": numbers})
+	if err != nil {
+		return nil, fmt.Errorf("requesting part URLs: %w", err)
+	}
+	if status < 200 || status >= 300 {
+		return nil, statusError("interim: part URLs", status, body)
+	}
+
+	var response interimPartsResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("parsing part URLs: %w (body: %s)", err, describeBody(body))
+	}
+	if len(response.Parts) == 0 {
+		return nil, fmt.Errorf("no part URLs in response: %s", describeBody(body))
+	}
+	return response.Parts, nil
+}
+
+// putPart streams one part to its presigned URL and returns the ETag that must
+// be reported back to the API.
+func (i *Interim) putPart(
+	ctx context.Context,
+	partURL string,
+	reader io.Reader,
+	length int64,
+	partNumber int,
+) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, partURL, io.LimitReader(reader, length))
+	if err != nil {
+		return "", fmt.Errorf("creating part %d request: %w", partNumber, err)
+	}
+	req.ContentLength = length
+
+	// The part contract documents no request headers: the URL and the raw bytes
+	// are all the storage provider needs.
+	resp, err := interimStreamingClient().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("part %d upload failed: %w", partNumber, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", statusError(fmt.Sprintf("interim: part %d", partNumber), resp.StatusCode, body)
+	}
+
+	etag := strings.TrimSpace(resp.Header.Get("ETag"))
+	if etag == "" {
+		return "", fmt.Errorf("part %d: no ETag in response", partNumber)
+	}
+	return etag, nil
+}
+
+// reportPart records a part's ETag and byte size with the API.
+func (i *Interim) reportPart(
+	ctx context.Context,
+	intent *interimIntent,
+	partNumber int,
+	etag string,
+	size int64,
+) error {
+	reportURL := fmt.Sprintf("%s/%d", strings.TrimSuffix(intent.PartsURL, "/"), partNumber)
+
+	status, body, err := interimRequest(ctx, http.MethodPut, reportURL, "", intent.UploadToken,
+		map[string]any{"etag": etag, "size": size})
+	if err != nil {
+		return fmt.Errorf("reporting part %d: %w", partNumber, err)
+	}
+	if status < 200 || status >= 300 {
+		return statusError(fmt.Sprintf("interim: report part %d", partNumber), status, body)
+	}
+	return nil
+}
+
+// interimPartLength returns the byte length of one part. Only the final part may
+// be shorter than part_size.
+func interimPartLength(size, partSize int64, partNumber, partCount int) int64 {
+	if partNumber < partCount {
+		return partSize
+	}
+	return size - int64(partCount-1)*partSize
+}
+
+// interimStreamingClient returns the shared client without its overall
+// five-minute timeout: a single PUT or an individual part can legitimately take
+// longer. Context cancellation still aborts the transfer.
+func interimStreamingClient() *http.Client {
+	client := *httpclient.Get()
+	client.Timeout = 0
+	return &client
+}
+
 // complete commits the uploaded object. The API answers 409 upload_missing
-// while storage has not caught up with the PUT, so that case is retried with a
-// short backoff; every other status is reported immediately.
+// while storage has not caught up with the upload, and 409 upload_parts_incomplete
+// while multipart part reports have not propagated; both clear on their own, so
+// they are retried with a short backoff. Every other status is reported
+// immediately.
 func (i *Interim) complete(ctx context.Context, intent *interimIntent) (*interimFile, error) {
 	completeURL := intent.CompleteURL
 	if completeURL == "" {
@@ -273,7 +494,7 @@ func (i *Interim) complete(ctx context.Context, intent *interimIntent) (*interim
 			return nil, err
 		}
 
-		if status == http.StatusConflict && interimUploadMissing(body) {
+		if status == http.StatusConflict && interimRetryableConflict(body) {
 			lastErr = statusError("interim", status, body)
 			if attempt == interimCompleteAttempts {
 				break
@@ -322,9 +543,9 @@ func (i *Interim) abort(intent *interimIntent) {
 	_, _, _ = interimRequest(ctx, http.MethodDelete, intent.AbortURL, "", intent.UploadToken, nil)
 }
 
-// VerifyCredentials checks the user hash with GET /keys/me. A valid but
-// unapproved hash is rejected too: it could never create an upload intent while
-// public uploads are disabled.
+// VerifyCredentials checks the user hash with GET /keys/me. An unapproved hash
+// is accepted only when the instance has public uploads enabled; on a restricted
+// instance it could never create an upload intent.
 func (i *Interim) VerifyCredentials(ctx context.Context, creds plugin.Credentials, cfg plugin.Config) error {
 	userHash := strings.TrimSpace(creds["API_TOKEN"])
 	if userHash == "" {
@@ -343,7 +564,22 @@ func (i *Interim) VerifyCredentials(ctx context.Context, creds plugin.Credential
 	if err := json.Unmarshal(body, &info); err != nil {
 		return fmt.Errorf("interim: could not verify: parsing response: %w", err)
 	}
-	if !info.Approved {
+	if info.Approved {
+		return nil
+	}
+
+	status, body, err = interimRequest(ctx, http.MethodGet, interimBaseURL+"/status", "", "", nil)
+	if err != nil {
+		return fmt.Errorf("interim: could not verify approval: %w", err)
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("interim: could not verify approval: %s", describeBody(body))
+	}
+	var instance interimStatus
+	if err := json.Unmarshal(body, &instance); err != nil {
+		return fmt.Errorf("interim: could not verify approval: parsing status: %w", err)
+	}
+	if !instance.PublicUploads {
 		return fmt.Errorf("interim: %w: user hash is not approved for uploads (ask the admin to approve it)",
 			plugin.ErrCredentialRejected)
 	}
@@ -396,15 +632,20 @@ func interimRequest(
 	return resp.StatusCode, data, nil
 }
 
-// interimUploadMissing reports whether a 409 completion body means the object
-// has not reached storage yet. An unrecognised body is retried too: 409 is
-// documented on this endpoint only for that case.
-func interimUploadMissing(body []byte) bool {
+// interimRetryableConflict reports whether a 409 completion body describes a
+// state that can clear on its own: the object not being visible yet, or part
+// reports not having propagated. An unrecognised body is retried too, because
+// 409 has historically been used only for eventual consistency here.
+func interimRetryableConflict(body []byte) bool {
 	var envelope interimError
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return true
 	}
-	return envelope.Error.Code == "" || envelope.Error.Code == "upload_missing"
+	switch envelope.Error.Code {
+	case "", "upload_missing", "upload_parts_incomplete":
+		return true
+	}
+	return false
 }
 
 // interimSleep waits for d, returning false if the context is cancelled first.

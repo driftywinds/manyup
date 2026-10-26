@@ -15,7 +15,7 @@ client-rendered, sign-in gated, or have gone offline.
 | DataNodes | `datanodes.go` | **required** key | resolve server + multipart POST | 3 GB free / unlimited premium | [datanodes.md](datanodes.md) |
 | FuckingFast | `fuckingfast.go` | optional account id | raw `PUT` | no documented limit | [fuckingfast.md](fuckingfast.md) |
 | GoFile | `gofile.go` | optional token | `multipart/form-data` POST | no per-file cap; free tier allows 10,000 stored files | [gofile.md](gofile.md) |
-| interim | `interim.go` | **required** approved user hash | 3-step presigned `PUT` | 5 GiB single PUT | [interim.md](interim.md) |
+| interim | `interim.go` | **required** user hash (approved when uploads are restricted) | single presigned `PUT` or S3 multipart | 7 GB this instance; provider limit 5 TiB | [interim.md](interim.md) |
 | Mocha | `mocha.go` | **required** key | multipart presigned `PUT` | 20 GiB (per account) | [mocha.md](mocha.md) |
 | PixelDrain | `pixeldrain.go` | **required** key | raw `PUT` | plan-dependent | [pixeldrain.md](pixeldrain.md) |
 | storage.to | `storageto.go` | optional token | init → presigned `PUT` → confirm | 25 GB anonymous/free; 100 GB paid | [storageto.md](storageto.md) |
@@ -68,7 +68,7 @@ treated as inconclusive so a working token is never discarded because a host is 
 |---|---|---|
 | Mocha | `GET https://api.mocha.my/api/profile/summary` | `401` |
 | GoFile | `GET https://api.gofile.io/accounts/getid` | `401` (`{"status":"error-token"}`) |
-| interim | `GET https://interim.drifty.win/api/v1/keys/me` | `401`/`403`, or `200` with `"approved": false` |
+| interim | `GET https://interim.drifty.win/api/v1/keys/me`, then `/status` if unapproved | `401`/`403`, or `200` with `"approved": false` while `public_uploads` is false |
 | DataNodes | `GET https://datanodes.to/api/upload/server?key=...` | body has no `sess_id` (HTTP stays `200`) |
 | ZincDrive | `POST https://zincdrive.com/api/v1/s3/sign` | `401` |
 | BuzzHeavier | `GET https://buzzheavier.com/api/account` | `401` |

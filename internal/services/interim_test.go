@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,35 +20,53 @@ import (
 	"github.com/driftywinds/manyup/internal/plugin"
 )
 
+// interimReportedPart is the body the plugin sends for PUT /uploads/{id}/parts/{n}.
+type interimReportedPart struct {
+	ETag string `json:"etag"`
+	Size int64  `json:"size"`
+}
+
 // interimTestServer stands in for the interim API and its S3 endpoint.
 type interimTestServer struct {
 	*httptest.Server
 
-	mu               sync.Mutex
-	intentBody       map[string]any
-	intentAuth       string
-	intentStatus     int
-	putMethod        string
-	putHeaders       http.Header
-	putBody          []byte
-	putContentLength int64
-	completeCalls    int
-	completeStatuses []int
-	completeToken    string
-	completeAuth     string
-	abortCalls       int
-	abortToken       string
-	keyApproved      bool
-	keyStatus        int
+	mu                sync.Mutex
+	intentBody        map[string]any
+	intentAuth        string
+	intentStatus      int
+	putMethod         string
+	putHeaders        http.Header
+	putBody           []byte
+	putContentLength  int64
+	completeCalls     int
+	completeStatuses  []int
+	completeToken     string
+	completeAuth      string
+	completeConflict  string
+	abortCalls        int
+	abortToken        string
+	keyApproved       bool
+	keyStatus         int
+	publicUploads     bool
+	multipart         bool
+	partSize          int64
+	partCountOverride int
+	partRequests      [][]int
+	partBodies        map[int][]byte
+	partReportToken   string
+	reportedParts     map[int]interimReportedPart
 }
 
 func newInterimTestServer(t *testing.T) *interimTestServer {
 	t.Helper()
 
 	s := &interimTestServer{
-		intentStatus: http.StatusCreated,
-		keyApproved:  true,
-		keyStatus:    http.StatusOK,
+		intentStatus:  http.StatusCreated,
+		keyApproved:   true,
+		keyStatus:     http.StatusOK,
+		partSize:      4,
+		partBodies:    make(map[int][]byte),
+		reportedParts: make(map[int]interimReportedPart),
 	}
 
 	mux := http.NewServeMux()
@@ -68,6 +89,9 @@ func newInterimTestServer(t *testing.T) *interimTestServer {
 		s.intentAuth = r.Header.Get("Authorization")
 		s.intentBody = payload
 		status := s.intentStatus
+		multipart := s.multipart
+		partSize := s.partSize
+		partCountOverride := s.partCountOverride
 		s.mu.Unlock()
 
 		if status != http.StatusCreated {
@@ -77,8 +101,34 @@ func newInterimTestServer(t *testing.T) *interimTestServer {
 			return
 		}
 
+		if multipart {
+			declaredSize := int64(payload["size"].(float64))
+			partCount := int((declaredSize + partSize - 1) / partSize)
+			if partCountOverride > 0 {
+				partCount = partCountOverride
+			}
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"upload_id":           "up-1",
+				"mode":                "multipart",
+				"part_size":           partSize,
+				"part_count":          partCount,
+				"parts_url":           s.URL + "/api/v1/uploads/up-1/parts",
+				"status_url":          s.URL + "/api/v1/uploads/up-1",
+				"concurrency":         2,
+				"expires_at":          "2026-10-26T12:00:00Z",
+				"intent_expires_at":   "2026-10-26T12:15:00Z",
+				"upload_token":        "upload-token",
+				"complete_url":        s.URL + "/api/v1/uploads/up-1/complete",
+				"abort_url":           s.URL + "/api/v1/uploads/up-1",
+				"delete_token":        "delete-token",
+				"delete_token_header": "X-Delete-Token",
+			})
+			return
+		}
+
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"upload_id": "up-1",
+			"mode":      "single",
 			"url":       s.URL + "/storage/object",
 			"method":    "PUT",
 			"headers": map[string]string{
@@ -108,6 +158,87 @@ func newInterimTestServer(t *testing.T) *interimTestServer {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	mux.HandleFunc("/api/v1/uploads/up-1/parts", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("parts: method = %s, want POST", r.Method)
+		}
+		if got, want := r.Header.Get("X-Upload-Token"), "upload-token"; got != want {
+			t.Errorf("parts: X-Upload-Token = %q, want %q", got, want)
+		}
+
+		var payload struct {
+			PartNumbers []int `json:"part_numbers"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("parts: decoding body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		s.partRequests = append(s.partRequests, append([]int(nil), payload.PartNumbers...))
+		s.mu.Unlock()
+
+		parts := make([]map[string]any, 0, len(payload.PartNumbers))
+		for _, number := range payload.PartNumbers {
+			parts = append(parts, map[string]any{
+				"part_number": number,
+				"url":         fmt.Sprintf("%s/storage/part/%d", s.URL, number),
+				"expires_at":  "2026-10-26T12:00:00Z",
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"parts": parts})
+	})
+
+	mux.HandleFunc("/storage/part/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("part storage: method = %s, want PUT", r.Method)
+		}
+		number, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/storage/part/"))
+		if err != nil {
+			t.Errorf("part storage: bad part number in %q", r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		s.mu.Lock()
+		s.partBodies[number] = body
+		s.mu.Unlock()
+
+		w.Header().Set("ETag", fmt.Sprintf(`"etag-%d"`, number))
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mux.HandleFunc("/api/v1/uploads/up-1/parts/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("report part: method = %s, want PUT", r.Method)
+		}
+		if got, want := r.Header.Get("X-Upload-Token"), "upload-token"; got != want {
+			t.Errorf("report part: X-Upload-Token = %q, want %q", got, want)
+		}
+		number, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/v1/uploads/up-1/parts/"))
+		if err != nil {
+			t.Errorf("report part: bad part number in %q", r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		var report interimReportedPart
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			t.Errorf("report part: decoding body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		s.partReportToken = r.Header.Get("X-Upload-Token")
+		s.reportedParts[number] = report
+		s.mu.Unlock()
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	mux.HandleFunc("/api/v1/uploads/up-1/complete", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("complete: method = %s, want POST", r.Method)
@@ -126,7 +257,24 @@ func newInterimTestServer(t *testing.T) *interimTestServer {
 		if value, ok := s.intentBody["size"].(float64); ok {
 			declaredSize = int64(value)
 		}
+		multipart := s.multipart
+		partSize := s.partSize
+		reported := len(s.reportedParts)
+		conflictCode := s.completeConflict
 		s.mu.Unlock()
+
+		if status == http.StatusCreated && multipart {
+			expected := int((declaredSize + partSize - 1) / partSize)
+			if reported < expected {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error": map[string]string{
+						"code":    "upload_parts_incomplete",
+						"message": "Not all parts have been reported.",
+					},
+				})
+				return
+			}
+		}
 
 		switch status {
 		case http.StatusCreated:
@@ -140,10 +288,13 @@ func newInterimTestServer(t *testing.T) *interimTestServer {
 				},
 			})
 		case http.StatusConflict:
+			if conflictCode == "" {
+				conflictCode = "upload_missing"
+			}
 			writeJSON(w, status, map[string]any{
 				"error": map[string]string{
-					"code":    "upload_missing",
-					"message": "The uploaded object is not visible yet.",
+					"code":    conflictCode,
+					"message": "The upload is not ready to be committed yet.",
 				},
 			})
 		default:
@@ -190,6 +341,26 @@ func newInterimTestServer(t *testing.T) *interimTestServer {
 			"files":        1,
 			"bytes":        123,
 			"last_used_at": "2026-10-26T12:00:00Z",
+		})
+	})
+
+	mux.HandleFunc("/api/v1/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("status: method = %s, want GET", r.Method)
+		}
+
+		s.mu.Lock()
+		publicUploads := s.publicUploads
+		s.mu.Unlock()
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"accepting_uploads":        true,
+			"public_uploads":           publicUploads,
+			"max_file_size_bytes":      int64(7 << 30),
+			"download_url_ttl_seconds": 300,
+			"retention_seconds":        864000,
+			"retention_human":          "10 days",
+			"server_time":              "2026-10-26T12:00:00Z",
 		})
 	})
 
@@ -308,6 +479,155 @@ func TestInterimUpload(t *testing.T) {
 	}
 }
 
+func TestInterimUploadMultipart(t *testing.T) {
+	srv := newInterimTestServer(t)
+	srv.mu.Lock()
+	srv.multipart = true
+	srv.partSize = 4
+	srv.mu.Unlock()
+
+	payload := []byte("0123456789") // 10 bytes -> parts of 4, 4, 2
+	res, err := (&Interim{}).Upload(
+		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
+		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
+	if err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+	if got, want := res.Size, int64(len(payload)); got != want {
+		t.Errorf("Size = %d, want %d", got, want)
+	}
+
+	srv.mu.Lock()
+	requests := append([][]int(nil), srv.partRequests...)
+	bodies := make(map[int][]byte, len(srv.partBodies))
+	for number, body := range srv.partBodies {
+		bodies[number] = body
+	}
+	reports := make(map[int]interimReportedPart, len(srv.reportedParts))
+	for number, report := range srv.reportedParts {
+		reports[number] = report
+	}
+	calls, aborts := srv.completeCalls, srv.abortCalls
+	srv.mu.Unlock()
+
+	if len(requests) != 1 || !reflect.DeepEqual(requests[0], []int{1, 2, 3}) {
+		t.Errorf("part URL requests = %v, want [[1 2 3]]", requests)
+	}
+	for number, want := range map[int]string{1: "0123", 2: "4567", 3: "89"} {
+		if got := string(bodies[number]); got != want {
+			t.Errorf("part %d body = %q, want %q", number, got, want)
+		}
+	}
+	for number, wantSize := range map[int]int64{1: 4, 2: 4, 3: 2} {
+		want := interimReportedPart{ETag: fmt.Sprintf(`"etag-%d"`, number), Size: wantSize}
+		if got := reports[number]; got != want {
+			t.Errorf("part %d report = %+v, want %+v", number, got, want)
+		}
+	}
+	if got, want := calls, 1; got != want {
+		t.Errorf("completion calls = %d, want %d", got, want)
+	}
+	if aborts != 0 {
+		t.Errorf("abort calls = %d, want none on success", aborts)
+	}
+}
+
+func TestInterimMultipartBatchesPartURLs(t *testing.T) {
+	srv := newInterimTestServer(t)
+	srv.mu.Lock()
+	srv.multipart = true
+	srv.partSize = 1
+	srv.mu.Unlock()
+
+	payload := bytes.Repeat([]byte("x"), 205) // 205 parts -> 100, 100, 5
+	res, err := (&Interim{}).Upload(
+		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
+		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
+	if err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+	if got, want := res.Size, int64(len(payload)); got != want {
+		t.Errorf("Size = %d, want %d", got, want)
+	}
+
+	wantFirst := make([]int, 0, 100)
+	for number := 1; number <= 100; number++ {
+		wantFirst = append(wantFirst, number)
+	}
+	wantSecond := make([]int, 0, 100)
+	for number := 101; number <= 200; number++ {
+		wantSecond = append(wantSecond, number)
+	}
+	wantThird := []int{201, 202, 203, 204, 205}
+	wantBatches := [][]int{wantFirst, wantSecond, wantThird}
+
+	srv.mu.Lock()
+	requests := append([][]int(nil), srv.partRequests...)
+	reported := len(srv.reportedParts)
+	srv.mu.Unlock()
+
+	if !reflect.DeepEqual(requests, wantBatches) {
+		t.Errorf("part URL requests = %v, want %v", requests, wantBatches)
+	}
+	if got, want := reported, 205; got != want {
+		t.Errorf("reported parts = %d, want %d", got, want)
+	}
+}
+
+func TestInterimMultipartAbortsWhenCompleteFails(t *testing.T) {
+	srv := newInterimTestServer(t)
+	srv.mu.Lock()
+	srv.multipart = true
+	srv.partSize = 4
+	srv.mu.Unlock()
+	srv.setCompleteStatuses(http.StatusInternalServerError)
+
+	payload := []byte("0123456789")
+	_, err := (&Interim{}).Upload(
+		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
+		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "status 500") {
+		t.Errorf("error = %v, want it to contain %q", err, "status 500")
+	}
+
+	srv.mu.Lock()
+	aborts := srv.abortCalls
+	srv.mu.Unlock()
+	if got, want := aborts, 1; got != want {
+		t.Errorf("abort calls = %d, want %d", got, want)
+	}
+}
+
+func TestInterimMultipartRejectsPartGeometryMismatch(t *testing.T) {
+	srv := newInterimTestServer(t)
+	srv.mu.Lock()
+	srv.multipart = true
+	srv.partSize = 4
+	srv.partCountOverride = 2 // 10 bytes need 3 parts of 4 bytes
+	srv.mu.Unlock()
+
+	payload := []byte("0123456789")
+	_, err := (&Interim{}).Upload(
+		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
+		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "expected 3") {
+		t.Fatalf("err = %v, want a geometry mismatch error", err)
+	}
+
+	srv.mu.Lock()
+	requests, aborts := len(srv.partRequests), srv.abortCalls
+	srv.mu.Unlock()
+	if requests != 0 {
+		t.Errorf("part URL requests = %d, want none", requests)
+	}
+	if got, want := aborts, 1; got != want {
+		t.Errorf("abort calls = %d, want %d", got, want)
+	}
+}
+
 func TestInterimCompleteRetriesUploadMissing(t *testing.T) {
 	srv := newInterimTestServer(t)
 	srv.setCompleteStatuses(http.StatusConflict, http.StatusConflict, http.StatusCreated)
@@ -328,6 +648,38 @@ func TestInterimCompleteRetriesUploadMissing(t *testing.T) {
 	srv.mu.Unlock()
 
 	if got, want := calls, 3; got != want {
+		t.Errorf("completion calls = %d, want %d", got, want)
+	}
+	if aborts != 0 {
+		t.Errorf("abort calls = %d, want none after a successful retry", aborts)
+	}
+}
+
+func TestInterimCompleteRetriesUploadPartsIncomplete(t *testing.T) {
+	srv := newInterimTestServer(t)
+	srv.mu.Lock()
+	srv.multipart = true
+	srv.partSize = 4
+	srv.completeConflict = "upload_parts_incomplete"
+	srv.mu.Unlock()
+	srv.setCompleteStatuses(http.StatusConflict, http.StatusCreated)
+
+	payload := []byte("0123456789")
+	res, err := (&Interim{}).Upload(
+		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
+		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
+	if err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+	if got, want := res.URL, "https://interim.drifty.win/f/file-1"; got != want {
+		t.Errorf("URL = %q, want %q", got, want)
+	}
+
+	srv.mu.Lock()
+	calls, aborts := srv.completeCalls, srv.abortCalls
+	srv.mu.Unlock()
+
+	if got, want := calls, 2; got != want {
 		t.Errorf("completion calls = %d, want %d", got, want)
 	}
 	if aborts != 0 {
@@ -442,6 +794,19 @@ func TestInterimVerifyCredentials(t *testing.T) {
 		}
 	})
 
+	t.Run("unapproved hash is accepted when public uploads are enabled", func(t *testing.T) {
+		srv := newInterimTestServer(t)
+		srv.mu.Lock()
+		srv.keyApproved = false
+		srv.publicUploads = true
+		srv.mu.Unlock()
+
+		if err := (&Interim{}).VerifyCredentials(
+			context.Background(), plugin.Credentials{"API_TOKEN": "interim_test"}, nil); err != nil {
+			t.Errorf("VerifyCredentials returned %v, want nil", err)
+		}
+	})
+
 	t.Run("bad hash is rejected", func(t *testing.T) {
 		srv := newInterimTestServer(t)
 		srv.mu.Lock()
@@ -491,12 +856,6 @@ func TestInterimRejectsUnusableFiles(t *testing.T) {
 	if _, err := interim.Upload(context.Background(), "empty.bin", strings.NewReader(""), 0,
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("err = %v, want an empty-file error", err)
-	}
-
-	_, err := interim.Upload(context.Background(), "huge.bin", strings.NewReader("x"),
-		interimSinglePutLimit+1, plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "limit") {
-		t.Errorf("err = %v, want an over-limit error", err)
 	}
 }
 
