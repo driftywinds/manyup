@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -17,7 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/driftywinds/manyup/internal/config"
 	"github.com/driftywinds/manyup/internal/plugin"
+	"github.com/driftywinds/manyup/internal/uploader"
 )
 
 // interimReportedPart is the body the plugin sends for PUT /uploads/{id}/parts/{n}.
@@ -48,6 +51,7 @@ type interimTestServer struct {
 	keyApproved       bool
 	keyStatus         int
 	publicUploads     bool
+	acceptingUploads  bool
 	multipart         bool
 	partSize          int64
 	partCountOverride int
@@ -55,18 +59,20 @@ type interimTestServer struct {
 	partBodies        map[int][]byte
 	partReportToken   string
 	reportedParts     map[int]interimReportedPart
+	completeErrorCode string
 }
 
 func newInterimTestServer(t *testing.T) *interimTestServer {
 	t.Helper()
 
 	s := &interimTestServer{
-		intentStatus:  http.StatusCreated,
-		keyApproved:   true,
-		keyStatus:     http.StatusOK,
-		partSize:      4,
-		partBodies:    make(map[int][]byte),
-		reportedParts: make(map[int]interimReportedPart),
+		intentStatus:     http.StatusCreated,
+		keyApproved:      true,
+		keyStatus:        http.StatusOK,
+		acceptingUploads: true,
+		partSize:         4,
+		partBodies:       make(map[int][]byte),
+		reportedParts:    make(map[int]interimReportedPart),
 	}
 
 	mux := http.NewServeMux()
@@ -298,8 +304,12 @@ func newInterimTestServer(t *testing.T) *interimTestServer {
 				},
 			})
 		default:
+			code := "internal"
+			if s.completeErrorCode != "" {
+				code = s.completeErrorCode
+			}
 			writeJSON(w, status, map[string]any{
-				"error": map[string]string{"code": "internal", "message": "boom"},
+				"error": map[string]string{"code": code, "message": "boom"},
 			})
 		}
 	})
@@ -350,32 +360,39 @@ func newInterimTestServer(t *testing.T) *interimTestServer {
 		}
 
 		s.mu.Lock()
-		publicUploads := s.publicUploads
+		publicUploads, acceptingUploads := s.publicUploads, s.acceptingUploads
 		s.mu.Unlock()
 
 		writeJSON(w, http.StatusOK, map[string]any{
-			"accepting_uploads":        true,
-			"public_uploads":           publicUploads,
-			"max_file_size_bytes":      int64(7 << 30),
-			"download_url_ttl_seconds": 300,
-			"retention_seconds":        864000,
-			"retention_human":          "10 days",
-			"server_time":              "2026-10-26T12:00:00Z",
+			"accepting_uploads":          acceptingUploads,
+			"public_uploads":             publicUploads,
+			"max_file_size_bytes":        int64(7 << 30),
+			"download_url_ttl_seconds":   300,
+			"retention_seconds":          864000,
+			"retention_human":            "10 days",
+			"retention_extend_on_download": true,
+			"server_time":                "2026-10-26T12:00:00Z",
 		})
 	})
 
 	s.Server = httptest.NewServer(mux)
 	t.Cleanup(s.Close)
 
-	originalBase := interimBaseURL
-	interimBaseURL = s.URL + "/api/v1"
-	t.Cleanup(func() { interimBaseURL = originalBase })
-
 	originalDelay := interimCompleteRetryDelay
 	interimCompleteRetryDelay = time.Millisecond
 	t.Cleanup(func() { interimCompleteRetryDelay = originalDelay })
 
 	return s
+}
+
+// instance returns a plugin pointed at this test server. The default label keeps
+// the existing assertions about result.Service unchanged.
+func (s *interimTestServer) instance() *Interim {
+	return NewInterim(InterimServiceName, s.URL)
+}
+
+func (s *interimTestServer) namedInstance(name string) *Interim {
+	return NewInterim(name, s.URL)
 }
 
 func (s *interimTestServer) setCompleteStatuses(statuses ...int) {
@@ -394,11 +411,109 @@ func TestInterimRegistered(t *testing.T) {
 	}
 }
 
+func TestAllWithConfigRegistersInterimInstances(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SetOption("interim", "BASE_URL", "https://main.example.com")
+	cfg.SetOption("interim@friends", "BASE_URL", "https://friends.example.com")
+	cfg.SetCredential("interim@friends", "API_TOKEN", "interim_friends")
+	cfg.SetOption("interim@broken", "BASE_URL", "not a url with spaces")
+
+	registry := AllWithConfig(cfg)
+
+	main, ok := registry.Get("interim")
+	if !ok {
+		t.Fatal("the default interim instance is not registered")
+	}
+	if got, want := main.(*Interim).BaseURL(), "https://main.example.com"; got != want {
+		t.Errorf("default BaseURL = %q, want %q", got, want)
+	}
+
+	friends, ok := registry.Get("interim@friends")
+	if !ok {
+		t.Fatal("interim@friends is not registered")
+	}
+	if got, want := friends.(*Interim).BaseURL(), "https://friends.example.com"; got != want {
+		t.Errorf("friends BaseURL = %q, want %q", got, want)
+	}
+	if got, want := friends.DisplayName(), "interim (friends)"; got != want {
+		t.Errorf("friends DisplayName = %q, want %q", got, want)
+	}
+	if _, ok := registry.Get("interim@broken"); ok {
+		t.Error("an instance with an invalid BASE_URL must not be registered")
+	}
+}
+
+func TestAllWithConfigDerivesHostShapedInstance(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SetCredential("interim@files.example.com", "API_TOKEN", "interim_x")
+
+	registry := AllWithConfig(cfg)
+	instance, ok := registry.Get("interim@files.example.com")
+	if !ok {
+		t.Fatal("a host-shaped instance without BASE_URL should be registered")
+	}
+	if got, want := instance.(*Interim).BaseURL(), "https://files.example.com"; got != want {
+		t.Errorf("BaseURL = %q, want %q", got, want)
+	}
+}
+
+func TestInterimInstancesUploadIndependently(t *testing.T) {
+	mainInstance := newInterimTestServer(t)
+	friends := newInterimTestServer(t)
+
+	cfg := config.DefaultConfig()
+	cfg.SetOption("interim", "BASE_URL", mainInstance.URL)
+	cfg.SetCredential("interim", "API_TOKEN", "interim_main")
+	cfg.SetOption("interim@friends", "BASE_URL", friends.URL)
+	cfg.SetCredential("interim@friends", "API_TOKEN", "interim_friends")
+	cfg.SelectService("interim")
+	cfg.SelectService("interim@friends")
+
+	filePath := filepath.Join(t.TempDir(), "two-instances.txt")
+	payload := []byte("uploaded to two interim instances\n")
+	if err := os.WriteFile(filePath, payload, 0o600); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+
+	progress := make(chan uploader.Progress, 100)
+	result, err := uploader.New(AllWithConfig(cfg), cfg).UploadFile(
+		context.Background(), filePath, progress)
+	close(progress)
+	if err != nil {
+		t.Fatalf("UploadFile returned error: %v", err)
+	}
+	if got, want := len(result.Results), 2; got != want {
+		t.Fatalf("results = %d, want %d", got, want)
+	}
+	for _, res := range result.Results {
+		if res.Error != nil {
+			t.Errorf("%s: %v", res.Service, res.Error)
+		}
+	}
+
+	mainInstance.mu.Lock()
+	mainAuth, mainCalls := mainInstance.intentAuth, mainInstance.completeCalls
+	mainInstance.mu.Unlock()
+	friends.mu.Lock()
+	friendsAuth, friendsCalls := friends.intentAuth, friends.completeCalls
+	friends.mu.Unlock()
+
+	if got, want := mainAuth, "Bearer interim_main"; got != want {
+		t.Errorf("main instance Authorization = %q, want %q", got, want)
+	}
+	if got, want := friendsAuth, "Bearer interim_friends"; got != want {
+		t.Errorf("friends instance Authorization = %q, want %q", got, want)
+	}
+	if mainCalls != 1 || friendsCalls != 1 {
+		t.Errorf("completion calls = (%d, %d), want (1, 1)", mainCalls, friendsCalls)
+	}
+}
+
 func TestInterimUpload(t *testing.T) {
 	srv := newInterimTestServer(t)
 
 	payload := []byte("hello interim")
-	res, err := (&Interim{}).Upload(
+	res, err := srv.instance().Upload(
 		context.Background(),
 		filepath.Join("some", "dir", "test.pdf"),
 		bytes.NewReader(payload),
@@ -487,7 +602,7 @@ func TestInterimUploadMultipart(t *testing.T) {
 	srv.mu.Unlock()
 
 	payload := []byte("0123456789") // 10 bytes -> parts of 4, 4, 2
-	res, err := (&Interim{}).Upload(
+	res, err := srv.instance().Upload(
 		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 	if err != nil {
@@ -540,7 +655,7 @@ func TestInterimMultipartBatchesPartURLs(t *testing.T) {
 	srv.mu.Unlock()
 
 	payload := bytes.Repeat([]byte("x"), 205) // 205 parts -> 100, 100, 5
-	res, err := (&Interim{}).Upload(
+	res, err := srv.instance().Upload(
 		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 	if err != nil {
@@ -583,7 +698,7 @@ func TestInterimMultipartAbortsWhenCompleteFails(t *testing.T) {
 	srv.setCompleteStatuses(http.StatusInternalServerError)
 
 	payload := []byte("0123456789")
-	_, err := (&Interim{}).Upload(
+	_, err := srv.instance().Upload(
 		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 	if err == nil {
@@ -610,7 +725,7 @@ func TestInterimMultipartRejectsPartGeometryMismatch(t *testing.T) {
 	srv.mu.Unlock()
 
 	payload := []byte("0123456789")
-	_, err := (&Interim{}).Upload(
+	_, err := srv.instance().Upload(
 		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "expected 3") {
@@ -633,7 +748,7 @@ func TestInterimCompleteRetriesUploadMissing(t *testing.T) {
 	srv.setCompleteStatuses(http.StatusConflict, http.StatusConflict, http.StatusCreated)
 
 	payload := []byte("eventually visible")
-	res, err := (&Interim{}).Upload(
+	res, err := srv.instance().Upload(
 		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 	if err != nil {
@@ -665,7 +780,7 @@ func TestInterimCompleteRetriesUploadPartsIncomplete(t *testing.T) {
 	srv.setCompleteStatuses(http.StatusConflict, http.StatusCreated)
 
 	payload := []byte("0123456789")
-	res, err := (&Interim{}).Upload(
+	res, err := srv.instance().Upload(
 		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 	if err != nil {
@@ -695,7 +810,7 @@ func TestInterimAbortsAfterPersistentUploadMissing(t *testing.T) {
 	)
 
 	payload := []byte("never visible")
-	_, err := (&Interim{}).Upload(
+	_, err := srv.instance().Upload(
 		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 	if err == nil {
@@ -725,7 +840,7 @@ func TestInterimAbortsWhenCompleteFails(t *testing.T) {
 	srv.setCompleteStatuses(http.StatusInternalServerError)
 
 	payload := []byte("boom")
-	_, err := (&Interim{}).Upload(
+	_, err := srv.instance().Upload(
 		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 	if err == nil {
@@ -754,7 +869,7 @@ func TestInterimReportsIntentStatus(t *testing.T) {
 	srv.intentStatus = http.StatusTooManyRequests
 	srv.mu.Unlock()
 
-	_, err := (&Interim{}).Upload(
+	_, err := srv.instance().Upload(
 		context.Background(), "test.pdf", strings.NewReader("data"), 4,
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 	if err == nil {
@@ -774,8 +889,8 @@ func TestInterimReportsIntentStatus(t *testing.T) {
 
 func TestInterimVerifyCredentials(t *testing.T) {
 	t.Run("approved hash", func(t *testing.T) {
-		newInterimTestServer(t)
-		if err := (&Interim{}).VerifyCredentials(
+		srv := newInterimTestServer(t)
+		if err := srv.instance().VerifyCredentials(
 			context.Background(), plugin.Credentials{"API_TOKEN": "interim_test"}, nil); err != nil {
 			t.Errorf("VerifyCredentials returned %v, want nil", err)
 		}
@@ -787,7 +902,7 @@ func TestInterimVerifyCredentials(t *testing.T) {
 		srv.keyApproved = false
 		srv.mu.Unlock()
 
-		err := (&Interim{}).VerifyCredentials(
+		err := srv.instance().VerifyCredentials(
 			context.Background(), plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 		if !errors.Is(err, plugin.ErrCredentialRejected) {
 			t.Errorf("err = %v, want ErrCredentialRejected", err)
@@ -801,7 +916,7 @@ func TestInterimVerifyCredentials(t *testing.T) {
 		srv.publicUploads = true
 		srv.mu.Unlock()
 
-		if err := (&Interim{}).VerifyCredentials(
+		if err := srv.instance().VerifyCredentials(
 			context.Background(), plugin.Credentials{"API_TOKEN": "interim_test"}, nil); err != nil {
 			t.Errorf("VerifyCredentials returned %v, want nil", err)
 		}
@@ -813,7 +928,7 @@ func TestInterimVerifyCredentials(t *testing.T) {
 		srv.keyStatus = http.StatusUnauthorized
 		srv.mu.Unlock()
 
-		err := (&Interim{}).VerifyCredentials(
+		err := srv.instance().VerifyCredentials(
 			context.Background(), plugin.Credentials{"API_TOKEN": "interim_wrong"}, nil)
 		if !errors.Is(err, plugin.ErrCredentialRejected) {
 			t.Errorf("err = %v, want ErrCredentialRejected", err)
@@ -826,7 +941,7 @@ func TestInterimVerifyCredentials(t *testing.T) {
 		srv.keyStatus = http.StatusTooManyRequests
 		srv.mu.Unlock()
 
-		err := (&Interim{}).VerifyCredentials(
+		err := srv.instance().VerifyCredentials(
 			context.Background(), plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
 		if err == nil {
 			t.Fatal("expected an error")
@@ -836,26 +951,248 @@ func TestInterimVerifyCredentials(t *testing.T) {
 		}
 	})
 
-	t.Run("empty hash is rejected", func(t *testing.T) {
-		err := (&Interim{}).VerifyCredentials(
+	t.Run("anonymous is accepted when public uploads are enabled", func(t *testing.T) {
+		srv := newInterimTestServer(t)
+		srv.mu.Lock()
+		srv.publicUploads = true
+		srv.mu.Unlock()
+
+		if err := srv.instance().VerifyCredentials(
+			context.Background(), plugin.Credentials{}, nil); err != nil {
+			t.Errorf("VerifyCredentials returned %v, want nil", err)
+		}
+	})
+
+	t.Run("anonymous is rejected when uploads are restricted", func(t *testing.T) {
+		srv := newInterimTestServer(t)
+
+		err := srv.instance().VerifyCredentials(
 			context.Background(), plugin.Credentials{}, nil)
 		if !errors.Is(err, plugin.ErrCredentialRejected) {
 			t.Errorf("err = %v, want ErrCredentialRejected", err)
 		}
 	})
+
+	t.Run("anonymous is rejected when the instance is not accepting uploads", func(t *testing.T) {
+		srv := newInterimTestServer(t)
+		srv.mu.Lock()
+		srv.publicUploads = true
+		srv.acceptingUploads = false
+		srv.mu.Unlock()
+
+		err := srv.instance().VerifyCredentials(
+			context.Background(), plugin.Credentials{}, nil)
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if errors.Is(err, plugin.ErrCredentialRejected) {
+			t.Error("an unavailable instance must not reject the credential")
+		}
+	})
 }
 
 func TestInterimRejectsUnusableFiles(t *testing.T) {
-	interim := &Interim{}
-
-	if _, err := interim.Upload(context.Background(), "x.bin", strings.NewReader("x"), 1,
-		plugin.Credentials{}, nil); err == nil || !strings.Contains(err.Error(), "API_TOKEN") {
-		t.Errorf("err = %v, want an API_TOKEN error", err)
-	}
+	interim := NewInterim("", "")
 
 	if _, err := interim.Upload(context.Background(), "empty.bin", strings.NewReader(""), 0,
 		plugin.Credentials{"API_TOKEN": "interim_test"}, nil); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("err = %v, want an empty-file error", err)
+	}
+}
+
+func TestInterimAnonymousUpload(t *testing.T) {
+	srv := newInterimTestServer(t)
+
+	payload := []byte("public upload")
+	res, err := srv.instance().Upload(
+		context.Background(), "public.txt", bytes.NewReader(payload), int64(len(payload)),
+		nil, nil)
+	if err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+	if got, want := res.Service, "interim"; got != want {
+		t.Errorf("Service = %q, want %q", got, want)
+	}
+
+	srv.mu.Lock()
+	intentAuth := srv.intentAuth
+	completeAuth := srv.completeAuth
+	srv.mu.Unlock()
+
+	if intentAuth != "" {
+		t.Errorf("anonymous intent sent Authorization %q", intentAuth)
+	}
+	if completeAuth != "" {
+		t.Errorf("completion sent Authorization %q", completeAuth)
+	}
+}
+
+func TestInterimInstanceUploadUsesItsOwnInstance(t *testing.T) {
+	srv := newInterimTestServer(t)
+	instance := srv.namedInstance("interim@friends")
+
+	payload := []byte("instance upload")
+	res, err := instance.Upload(
+		context.Background(), "instance.txt", bytes.NewReader(payload), int64(len(payload)),
+		plugin.Credentials{"API_TOKEN": "interim_friends"}, nil)
+	if err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+	if got, want := res.Service, "interim@friends"; got != want {
+		t.Errorf("Service = %q, want %q", got, want)
+	}
+	if got, want := instance.DisplayName(), "interim (friends)"; got != want {
+		t.Errorf("DisplayName = %q, want %q", got, want)
+	}
+
+	srv.mu.Lock()
+	intentAuth := srv.intentAuth
+	srv.mu.Unlock()
+	if got, want := intentAuth, "Bearer interim_friends"; got != want {
+		t.Errorf("intent Authorization = %q, want %q", got, want)
+	}
+}
+
+func TestInterimCompleteRetriesUploadBusy(t *testing.T) {
+	srv := newInterimTestServer(t)
+	srv.mu.Lock()
+	srv.completeConflict = "upload_busy"
+	srv.mu.Unlock()
+	srv.setCompleteStatuses(http.StatusConflict, http.StatusCreated)
+
+	payload := []byte("busy then ready")
+	res, err := srv.instance().Upload(
+		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
+		plugin.Credentials{"API_TOKEN": "interim_test"}, nil)
+	if err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+	if got, want := res.URL, "https://interim.drifty.win/f/file-1"; got != want {
+		t.Errorf("URL = %q, want %q", got, want)
+	}
+
+	srv.mu.Lock()
+	calls, aborts := srv.completeCalls, srv.abortCalls
+	srv.mu.Unlock()
+	if got, want := calls, 2; got != want {
+		t.Errorf("completion calls = %d, want %d", got, want)
+	}
+	if aborts != 0 {
+		t.Errorf("abort calls = %d, want none after a successful retry", aborts)
+	}
+}
+
+func TestInterimCompleteRetriesCompletionBusy(t *testing.T) {
+	srv := newInterimTestServer(t)
+	srv.mu.Lock()
+	srv.completeErrorCode = "completion_busy"
+	srv.mu.Unlock()
+	srv.setCompleteStatuses(http.StatusTooManyRequests, http.StatusCreated)
+
+	payload := []byte("limiter")
+	if _, err := srv.instance().Upload(
+		context.Background(), "test.pdf", bytes.NewReader(payload), int64(len(payload)),
+		plugin.Credentials{"API_TOKEN": "interim_test"}, nil); err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+
+	srv.mu.Lock()
+	calls := srv.completeCalls
+	srv.mu.Unlock()
+	if got, want := calls, 2; got != want {
+		t.Errorf("completion calls = %d, want %d", got, want)
+	}
+}
+
+func TestInterimRetryableCompletionCodes(t *testing.T) {
+	for _, code := range []string{"", "upload_missing", "upload_parts_incomplete", "upload_busy"} {
+		if !interimRetryableConflict([]byte(`{"error":{"code":"` + code + `"}}`)) {
+			t.Errorf("conflict code %q should be retryable", code)
+		}
+	}
+	if !interimRetryableConflict([]byte("not the envelope")) {
+		t.Error("an unrecognised conflict body should be retryable")
+	}
+	for _, code := range []string{"upload_closed", "upload_changed"} {
+		if interimRetryableConflict([]byte(`{"error":{"code":"` + code + `"}}`)) {
+			t.Errorf("conflict code %q should not be retryable", code)
+		}
+	}
+
+	for _, code := range []string{"", "completion_busy", "rate_limited"} {
+		if !interimRetryableRateLimit([]byte(`{"error":{"code":"` + code + `"}}`)) {
+			t.Errorf("rate-limit code %q should be retryable during completion", code)
+		}
+	}
+	if !interimRetryableRateLimit([]byte("not the envelope")) {
+		t.Error("an unrecognised 429 body should be retryable during completion")
+	}
+}
+
+func TestInterimInstanceNames(t *testing.T) {
+	if got, want := InterimInstanceServiceName("friends"), "interim@friends"; got != want {
+		t.Errorf("InterimInstanceServiceName = %q, want %q", got, want)
+	}
+	if name, ok := InterimInstanceName("interim@friends"); !ok || name != "friends" {
+		t.Errorf("InterimInstanceName(interim@friends) = (%q, %v), want (friends, true)", name, ok)
+	}
+	if _, ok := InterimInstanceName("interim"); ok {
+		t.Error("the default instance must not be reported as an additional instance")
+	}
+	if _, ok := InterimInstanceName("interim@"); ok {
+		t.Error("an empty instance label must be rejected")
+	}
+}
+
+func TestNormalizeInterimURL(t *testing.T) {
+	cases := []struct {
+		in     string
+		origin string
+		api    string
+	}{
+		{"https://files.example.com", "https://files.example.com", "https://files.example.com/api/v1"},
+		{"https://files.example.com/", "https://files.example.com", "https://files.example.com/api/v1"},
+		{"https://files.example.com/api/v1", "https://files.example.com", "https://files.example.com/api/v1"},
+		{"https://files.example.com/api/v1/", "https://files.example.com", "https://files.example.com/api/v1"},
+		{"http://127.0.0.1:8080", "http://127.0.0.1:8080", "http://127.0.0.1:8080/api/v1"},
+		{"files.example.com", "https://files.example.com", "https://files.example.com/api/v1"},
+		{"HTTPS://Files.Example.com", "https://files.example.com", "https://files.example.com/api/v1"},
+	}
+	for _, c := range cases {
+		origin, api, err := NormalizeInterimURL(c.in)
+		if err != nil {
+			t.Errorf("NormalizeInterimURL(%q) returned %v", c.in, err)
+			continue
+		}
+		if origin != c.origin || api != c.api {
+			t.Errorf("NormalizeInterimURL(%q) = (%q, %q), want (%q, %q)", c.in, origin, api, c.origin, c.api)
+		}
+	}
+
+	for _, bad := range []string{"", "ftp://files.example.com", "https://files.example.com/prefix", "https://files.example.com?x=1", "https://"} {
+		if _, _, err := NormalizeInterimURL(bad); err == nil {
+			t.Errorf("NormalizeInterimURL(%q) returned no error", bad)
+		}
+	}
+}
+
+func TestSuggestAndValidateInterimInstanceName(t *testing.T) {
+	if got, want := SuggestInterimInstanceName("https://Files.Example.com"), "files.example.com"; got != want {
+		t.Errorf("SuggestInterimInstanceName = %q, want %q", got, want)
+	}
+	if got, want := SuggestInterimInstanceName("http://127.0.0.1:8080"), "127.0.0.1"; got != want {
+		t.Errorf("SuggestInterimInstanceName = %q, want %q", got, want)
+	}
+
+	for _, good := range []string{"friends", "files.example.com", "a-b_c", "x1"} {
+		if err := ValidateInterimInstanceName(good); err != nil {
+			t.Errorf("ValidateInterimInstanceName(%q) returned %v", good, err)
+		}
+	}
+	for _, bad := range []string{"", "Friends", "-friends", "friends-", "a@b", "a b", "a/b", "a:b"} {
+		if err := ValidateInterimInstanceName(bad); err == nil {
+			t.Errorf("ValidateInterimInstanceName(%q) returned no error", bad)
+		}
 	}
 }
 

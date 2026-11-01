@@ -9,11 +9,25 @@
 package services
 
 import (
+	"github.com/driftywinds/manyup/internal/config"
 	"github.com/driftywinds/manyup/internal/plugin"
 )
 
-// All returns a new registry pre-loaded with every built-in service plugin.
+// All returns a new registry pre-loaded with every built-in service plugin and
+// the default interim instance. Configured interim instances are added by
+// AllWithConfig.
 func All() *plugin.Registry {
+	return buildRegistry(nil)
+}
+
+// AllWithConfig returns a registry that also contains one plugin per configured
+// interim instance, so each instance can be selected and uploaded to
+// independently. A nil config is equivalent to All.
+func AllWithConfig(cfg *config.AppConfig) *plugin.Registry {
+	return buildRegistry(cfg)
+}
+
+func buildRegistry(cfg *config.AppConfig) *plugin.Registry {
 	r := plugin.NewRegistry()
 	// Each service's init() calls r.Register(), but since init runs on import
 	// we register explicitly here for clarity and testability.
@@ -21,7 +35,7 @@ func All() *plugin.Registry {
 	RegisterDataNodes(r)
 	RegisterFuckingFast(r)
 	RegisterGoFile(r)
-	RegisterInterim(r)
+	RegisterInterimConfigured(r, cfg)
 	RegisterMocha(r)
 	RegisterZeroXZero(r)
 	RegisterPixelDrain(r)

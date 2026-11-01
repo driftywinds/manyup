@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,8 @@ func main() {
 		cmdServices()
 	case "config":
 		cmdConfig()
+	case "interim":
+		cmdInterim()
 	case "completion":
 		cmdCompletion()
 	case "__complete":
@@ -84,11 +87,14 @@ COMMANDS:
   config menu                 Interactive service selector
   config set <service>                 Prompt for the API token (quote-free, any characters)
   config set <service> <value>         Set the API token (key defaults to API_TOKEN)
-  config set <service> <key> <value>   Set any credential explicitly
+  config set <service> <key> <value>   Set any credential or option explicitly
   config show                 Show current configuration
   config mode <parallel|sequential>    Set upload mode
   config select <service>     Toggle a service on/off
   config retry <max> [seconds]  Retries per service + base backoff delay
+  interim list                List the default and configured interim instances
+  interim add <url> [name]    Add a self-hosted interim instance (optional hash)
+  interim remove <name>       Remove a configured interim instance
   completion <shell>          Print a completion script (bash|zsh|fish|powershell|clink)
   where                       Show where manyup is installed and where its config lives
   version                     Print version
@@ -104,6 +110,10 @@ EXAMPLES:
   # Configure a service — the key defaults to API_TOKEN
   manyup config set mocha mocha_xxxxxxxxxxxxxxxxx
   manyup config set gofile API_TOKEN mytoken123
+
+  # Add a self-hosted interim instance (prompts for an optional hash)
+  manyup interim add https://files.example.com friends
+  manyup config select interim@friends
 
   # Enable tab completion (then restart your shell)
   manyup completion powershell | Out-String | Invoke-Expression
@@ -138,7 +148,7 @@ func cmdUpload() {
 		os.Exit(1)
 	}
 
-	registry := services.All()
+	registry := services.AllWithConfig(cfg)
 	mgr := uploader.New(registry, cfg)
 
 	// Set up context with signal handling for graceful abort.
@@ -181,7 +191,14 @@ func cmdUpload() {
 }
 
 func cmdServices() {
-	registry := services.All()
+	// A broken config should not hide the built-in services; fall back to the
+	// defaults and let the listing report what it can.
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not read config: %v\n", err)
+		cfg = nil
+	}
+	registry := services.AllWithConfig(cfg)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tDESCRIPTION\tAUTH REQUIRED")
 	fmt.Fprintln(w, "----\t-----------\t-------------")
@@ -263,7 +280,7 @@ func cmdConfig() {
 			os.Exit(1)
 		}
 
-		registry := services.All()
+		registry := services.AllWithConfig(cfg)
 		svc, ok := registry.Get(service)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Unknown service: %s (available: %s)\n",
@@ -283,6 +300,17 @@ func cmdConfig() {
 			}
 		}
 
+		// An interim instance origin is validated before it is saved so a typo
+		// cannot silently point uploads at the wrong host.
+		if strings.EqualFold(key, "BASE_URL") && services.IsInterimService(service) {
+			origin, _, originErr := services.NormalizeInterimURL(value)
+			if originErr != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", originErr)
+				os.Exit(1)
+			}
+			value = origin
+		}
+
 		// Check the credential first: a token the service refuses is a typo,
 		// and persisting it would only postpone the failure to upload time.
 		note, verifyErr := authenticateCredential(svc, key, value)
@@ -292,7 +320,13 @@ func cmdConfig() {
 			os.Exit(1)
 		}
 
-		cfg.SetCredential(service, key, value)
+		// Credentials and options are stored separately: plugins read tokens
+		// from Credentials and settings such as BASE_URL or path from Options.
+		if isCredentialKey(key) {
+			cfg.SetCredential(service, key, value)
+		} else {
+			cfg.SetOption(service, key, value)
+		}
 		if err := cfg.Save(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
 			os.Exit(1)
@@ -358,7 +392,7 @@ func cmdConfig() {
 			os.Exit(1)
 		}
 		service := args[1]
-		registry := services.All()
+		registry := services.AllWithConfig(cfg)
 		if _, ok := registry.Get(service); !ok {
 			fmt.Fprintf(os.Stderr, "Unknown service: %s (available: %s)\n",
 				service, strings.Join(registry.Names(), ", "))
@@ -387,6 +421,260 @@ func cmdConfig() {
 	}
 }
 
+// ── interim instances ───────────────────────────────────────────────
+
+// cmdInterim manages additional interim instances. interim is open source, so
+// anyone can host one; each configured instance becomes its own service named
+// interim@<label> that can be selected and uploaded to independently.
+func cmdInterim() {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	args := os.Args[2:]
+	if len(args) == 0 {
+		cmdInterimList(cfg)
+		return
+	}
+
+	switch args[0] {
+	case "list", "ls":
+		cmdInterimList(cfg)
+	case "add":
+		cmdInterimAdd(cfg, args[1:])
+	case "remove", "rm":
+		cmdInterimRemove(cfg, args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown interim command: %s\n\n", args[0])
+		printInterimUsage()
+		os.Exit(1)
+	}
+}
+
+func printInterimUsage() {
+	fmt.Print(`Manage self-hosted interim instances.
+
+USAGE:
+  manyup interim list
+  manyup interim add <url> [name] [hash]
+  manyup interim remove <name>
+
+The default instance (https://interim.drifty.win) is always available as
+service "interim". Every added instance is registered as "interim@<name>",
+so it can be selected and uploaded to like any other service:
+
+  manyup interim add https://files.example.com friends
+  manyup config select interim@friends
+  manyup upload myfile.zip
+
+The user hash is optional. On an instance with public uploads enabled,
+uploads work anonymously; on a restricted instance the hash must be approved
+by that instance's admin. Omit the hash argument to be prompted; leave the
+prompt empty for anonymous uploads.
+`)
+}
+
+// looksLikeInterimHash distinguishes a user hash from an instance name in the
+// optional positional argument. interim hashes are long and start with
+// "interim_"; a label is limited to 48 characters.
+func looksLikeInterimHash(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.HasPrefix(value, "interim_") && len(value) > 20
+}
+
+func cmdInterimAdd(cfg *config.AppConfig, args []string) {
+	if len(args) < 1 || len(args) > 3 {
+		fmt.Fprintln(os.Stderr, "Usage: manyup interim add <url> [name] [hash]")
+		os.Exit(1)
+	}
+
+	origin, _, err := services.NormalizeInterimURL(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// The forms are: <url>, <url> <name>, <url> <name> <hash>. Treat a lone
+	// second argument that looks like an interim hash as the hash, so
+	// `interim add <url> interim_...` does the expected thing instead of
+	// creating an instance named after the token.
+	token := ""
+	arguments := append([]string(nil), args[1:]...)
+	if len(arguments) == 1 && looksLikeInterimHash(arguments[0]) {
+		token = strings.TrimSpace(arguments[0])
+		arguments = nil
+	}
+	if len(arguments) >= 2 {
+		token = strings.TrimSpace(arguments[1])
+	}
+
+	name := ""
+	if len(arguments) >= 1 {
+		name = strings.ToLower(strings.TrimSpace(arguments[0]))
+	}
+	if name == "" {
+		name = services.SuggestInterimInstanceName(origin)
+	}
+	if err := services.ValidateInterimInstanceName(name); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	service := services.InterimInstanceServiceName(name)
+	if _, exists := cfg.Service(service); exists {
+		fmt.Fprintf(os.Stderr, "Error: an interim instance named %q already exists (%s)\n", name, service)
+		os.Exit(1)
+	}
+
+	// Refuse to configure the same origin twice: that would upload every file
+	// to the same place twice.
+	for _, candidate := range interimServices(cfg) {
+		if candidate == services.InterimServiceName {
+			continue
+		}
+		if services.ConfiguredInterimBaseURL(cfg, candidate) == origin {
+			fmt.Fprintf(os.Stderr, "Error: %s is already configured as %s\n", origin, candidate)
+			os.Exit(1)
+		}
+	}
+	if services.ConfiguredInterimBaseURL(cfg, services.InterimServiceName) == origin {
+		fmt.Fprintf(os.Stderr, "Error: %s is the default instance; set its hash with `manyup config set interim <hash>`\n", origin)
+		os.Exit(1)
+	}
+
+	if token == "" {
+		fmt.Printf("Paste an approved user hash for %s, or press Enter for anonymous uploads:\n> ", origin)
+		token, err = readOptionalSecretValue(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	instance := services.NewInterim(service, origin)
+	note := ""
+	if token != "" {
+		note, err = authenticateCredential(instance, "API_TOKEN", token)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "✗ %v\n", err)
+			fmt.Fprintln(os.Stderr, "Instance was not added.")
+			os.Exit(1)
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), credentialTimeout)
+		verifyErr := instance.VerifyCredentials(ctx, nil, nil)
+		cancel()
+		switch {
+		case verifyErr == nil:
+			note = "(anonymous uploads verified)"
+		case errors.Is(verifyErr, plugin.ErrCredentialRejected):
+			fmt.Fprintf(os.Stderr, "✗ %v\n", verifyErr)
+			fmt.Fprintln(os.Stderr, "Instance was not added. Provide an approved user hash for a restricted instance.")
+			os.Exit(1)
+		default:
+			note = fmt.Sprintf("(saved, but anonymous uploads could not be verified: %v)", verifyErr)
+		}
+	}
+
+	cfg.SetOption(service, "BASE_URL", origin)
+	if token != "" {
+		cfg.SetCredential(service, "API_TOKEN", token)
+	}
+	cfg.SelectService(service)
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✓ Added interim instance %s (%s) %s\n", name, origin, note)
+	fmt.Printf("  service: %s (selected)\n", service)
+}
+
+func cmdInterimRemove(cfg *config.AppConfig, args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "Usage: manyup interim remove <name>")
+		os.Exit(1)
+	}
+
+	name := strings.ToLower(strings.TrimSpace(args[0]))
+	if name == "" || name == services.InterimServiceName {
+		fmt.Fprintln(os.Stderr, "Error: the default interim instance cannot be removed; disable it with `manyup config select interim`")
+		os.Exit(1)
+	}
+	if err := services.ValidateInterimInstanceName(name); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	service := services.InterimInstanceServiceName(name)
+	_, exists := cfg.Service(service)
+	if !exists && !cfg.IsSelected(service) {
+		fmt.Fprintf(os.Stderr, "Error: no interim instance named %q (run `manyup interim list`)\n", name)
+		os.Exit(1)
+	}
+
+	cfg.RemoveService(service)
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✓ Removed interim instance %s (%s)\n", name, service)
+}
+
+func cmdInterimList(cfg *config.AppConfig) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "SERVICE\tURL\tAUTH\tSELECTED")
+	fmt.Fprintln(w, "-------\t---\t----\t--------")
+	for _, service := range interimServices(cfg) {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			service,
+			services.ConfiguredInterimBaseURL(cfg, service),
+			interimAuthState(cfg, service),
+			yesNo(cfg.IsSelected(service)))
+	}
+	w.Flush()
+	fmt.Println()
+	fmt.Println("Add another instance:  manyup interim add https://files.example.com [name]")
+}
+
+// interimServices lists the default instance followed by configured instances.
+func interimServices(cfg *config.AppConfig) []string {
+	servicesList := []string{services.InterimServiceName}
+	var instances []string
+	for service := range cfg.Services {
+		if _, ok := services.InterimInstanceName(service); ok {
+			instances = append(instances, service)
+		}
+	}
+	sort.Strings(instances)
+	return append(servicesList, instances...)
+}
+
+// interimAuthState describes where a credential would come from, if anywhere.
+func interimAuthState(cfg *config.AppConfig, service string) string {
+	if sc, ok := cfg.Service(service); ok && sc.Credentials != nil {
+		if strings.TrimSpace(sc.Credentials["API_TOKEN"]) != "" {
+			return "hash"
+		}
+	}
+	if service == services.InterimServiceName {
+		env := "MANYUP_" + strings.ToUpper(service) + "_API_TOKEN"
+		if strings.TrimSpace(os.Getenv(env)) != "" {
+			return "hash (env)"
+		}
+	}
+	return "anonymous"
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
 func printConfigUsage() {
 	fmt.Print(`Usage: manyup config <command>
 
@@ -394,7 +682,7 @@ Commands:
   menu                        Interactive service selector
   set <service>               Prompt for the token (safe for any characters)
   set <service> <value>       Set the API token (key defaults to API_TOKEN)
-  set <service> <key> <value> Set any credential explicitly
+  set <service> <key> <value> Set any credential or option explicitly
   show                        Show current configuration
   mode <parallel|sequential>  Set upload mode
   select <service>            Toggle a service on/off
@@ -404,6 +692,9 @@ Credentials are checked against the service before they are saved.
 
 If a token contains shell characters such as | & < > ^, quote it or omit the
 value and paste it at the prompt — the shell strips those before manyup runs.
+
+Self-hosted interim instances are added with "manyup interim add <url> [name]"
+and then selected like any other service (for example "interim@friends").
 `)
 }
 
@@ -459,6 +750,20 @@ func readSecretValue(r io.Reader) (string, error) {
 	return value, nil
 }
 
+// readOptionalSecretValue reads one line from r and allows it to be empty. It is
+// used where a credential is genuinely optional, such as an interim instance
+// with public uploads enabled: pressing Enter means "no hash".
+func readOptionalSecretValue(r io.Reader) (string, error) {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && line == "" {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
+		return "", fmt.Errorf("reading input: %w", err)
+	}
+	return strings.TrimSpace(line), nil
+}
+
 // isCredentialKey reports whether a config key identifies the caller to a
 // service. Options such as a folder id are not credentials and are not checked.
 func isCredentialKey(key string) bool {
@@ -510,7 +815,7 @@ func cmdConfigMenu() {
 		os.Exit(1)
 	}
 
-	registry := services.All()
+	registry := services.AllWithConfig(cfg)
 	names := registry.Names()
 
 	// Build selection set from current config.
@@ -606,12 +911,23 @@ func printConfig(cfg *config.AppConfig) {
 	fmt.Printf("Retries: %d per service (base delay %ds)\n", maxRetries, delay)
 	fmt.Printf("Selected services: %s\n", strings.Join(cfg.SelectedServices, ", "))
 	fmt.Println("\nService credentials:")
-	for name, sc := range cfg.Services {
+
+	names := make([]string, 0, len(cfg.Services))
+	for name := range cfg.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sc := cfg.Services[name]
 		keys := make([]string, 0, len(sc.Credentials))
 		for k := range sc.Credentials {
 			keys = append(keys, k)
 		}
-		fmt.Printf("  %s: %s (enabled: %v)\n", name, strings.Join(keys, ", "), sc.Enabled)
+		detail := ""
+		if url := services.ConfiguredInterimBaseURL(cfg, name); url != "" {
+			detail = " [" + url + "]"
+		}
+		fmt.Printf("  %s%s: %s (enabled: %v)\n", name, detail, strings.Join(keys, ", "), sc.Enabled)
 	}
 }
 
@@ -732,15 +1048,28 @@ func (d *progressDisplay) batchDone() bool {
 	return true
 }
 
+// barNameWidth keeps progress columns aligned even when an interim instance
+// service is named interim@files.example.com.
+const barNameWidth = 20
+
+// barName truncates a long service name so a progress row does not overflow.
+func barName(name string) string {
+	runes := []rune(name)
+	if len(runes) <= barNameWidth {
+		return name
+	}
+	return string(runes[:barNameWidth-1]) + "…"
+}
+
 func formatBarLine(bar *serviceBar) string {
 	if bar.status == "done" {
-		return fmt.Sprintf("  %-12s ✓ complete", bar.name)
+		return fmt.Sprintf("  %-*s ✓ complete", barNameWidth, barName(bar.name))
 	}
 	if bar.status == "error" {
-		return fmt.Sprintf("  %-12s ✗ failed", bar.name)
+		return fmt.Sprintf("  %-*s ✗ failed", barNameWidth, barName(bar.name))
 	}
 	if bar.status == "retry" {
-		return fmt.Sprintf("  %-12s ↻ %s", bar.name, bar.retryMsg)
+		return fmt.Sprintf("  %-*s ↻ %s", barNameWidth, barName(bar.name), bar.retryMsg)
 	}
 
 	const barWidth = 20
@@ -765,7 +1094,7 @@ func formatBarLine(bar *serviceBar) string {
 		etaStr = formatDuration(eta)
 	}
 
-	return fmt.Sprintf("  %-12s %s  %s  %s  ETA %s", bar.name, barStr, pctStr, speedStr, etaStr)
+	return fmt.Sprintf("  %-*s %s  %s  %s  ETA %s", barNameWidth, barName(bar.name), barStr, pctStr, speedStr, etaStr)
 }
 
 func formatBytes(b float64) string {
@@ -866,11 +1195,14 @@ func cmdUpdate() {
 
 // topLevelCommands are offered when completing the first word.
 var topLevelCommands = []string{
-	"upload", "services", "config", "completion", "where", "version", "update", "help",
+	"upload", "services", "config", "interim", "completion", "where", "version", "update", "help",
 }
 
 // configCommands are offered after `manyup config`.
 var configCommands = []string{"menu", "set", "show", "mode", "select", "retry"}
+
+// interimCommands are offered after `manyup interim`.
+var interimCommands = []string{"list", "add", "remove"}
 
 // shells are the completion scripts this build can emit.
 var shells = []string{"bash", "zsh", "fish", "powershell", "clink"}
@@ -884,14 +1216,24 @@ var clinkCompletion string
 // cmdComplete prints the candidates for the words already typed. It is the
 // hidden backend used by the generated completion scripts.
 func cmdComplete() {
-	for _, candidate := range completionCandidates(os.Args[2:]) {
+	registry := services.All()
+	if cfg, err := config.Load(); err == nil {
+		registry = services.AllWithConfig(cfg)
+	}
+	for _, candidate := range completionCandidatesFor(os.Args[2:], registry) {
 		fmt.Println(candidate)
 	}
 }
 
 // completionCandidates maps the words typed so far (everything after "manyup",
-// excluding the word being completed) to the words that may follow.
+// excluding the word being completed) to the words that may follow. It uses the
+// built-in services only; the CLI uses completionCandidatesFor so configured
+// interim instances are offered too.
 func completionCandidates(words []string) []string {
+	return completionCandidatesFor(words, services.All())
+}
+
+func completionCandidatesFor(words []string, registry *plugin.Registry) []string {
 	if len(words) == 0 {
 		return topLevelCommands
 	}
@@ -904,9 +1246,19 @@ func completionCandidates(words []string) []string {
 		case 2:
 			switch words[1] {
 			case "set", "select":
-				return services.All().Names()
+				return registry.Names()
 			case "mode":
 				return []string{"parallel", "sequential"}
+			}
+		}
+	case "interim":
+		switch len(words) {
+		case 1:
+			return interimCommands
+		case 2:
+			switch words[1] {
+			case "remove", "rm":
+				return interimInstanceLabels(registry)
 			}
 		}
 	case "completion":
@@ -915,6 +1267,18 @@ func completionCandidates(words []string) []string {
 		}
 	}
 	return nil
+}
+
+// interimInstanceLabels lists configured instances without the interim@ prefix,
+// for `manyup interim remove <TAB>`.
+func interimInstanceLabels(registry *plugin.Registry) []string {
+	var labels []string
+	for _, service := range registry.Names() {
+		if label, ok := services.InterimInstanceName(service); ok {
+			labels = append(labels, label)
+		}
+	}
+	return labels
 }
 
 // cmdCompletion prints the completion script for a shell.

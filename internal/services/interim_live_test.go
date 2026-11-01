@@ -25,14 +25,15 @@ import (
 // `go test -tags live` plus INTERIM_API_TOKEN.
 func TestInterimLive(t *testing.T) {
 	token := interimLiveToken(t)
+	instance := interimLiveInstance()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	interimLiveVerify(t, ctx, token)
+	interimLiveVerify(t, ctx, instance, token)
 
 	payload := []byte(fmt.Sprintf("manyup interim live check %d\n", time.Now().UnixNano()))
-	interimLiveRoundTrip(t, ctx, token, "manyup-interim-check.txt", payload)
+	interimLiveRoundTrip(t, ctx, instance, token, "manyup-interim-check.txt", payload)
 }
 
 // TestInterimMultipartLive exercises an upload above the instance's multipart
@@ -40,6 +41,7 @@ func TestInterimLive(t *testing.T) {
 // (65 MiB when this was written); it is skipped otherwise.
 func TestInterimMultipartLive(t *testing.T) {
 	token := interimLiveToken(t)
+	instance := interimLiveInstance()
 
 	megabytes, err := strconv.Atoi(strings.TrimSpace(os.Getenv("INTERIM_MULTIPART_MB")))
 	if err != nil || megabytes <= 0 {
@@ -49,14 +51,14 @@ func TestInterimMultipartLive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	interimLiveVerify(t, ctx, token)
+	interimLiveVerify(t, ctx, instance, token)
 
 	size := int64(megabytes) << 20
 	payload := make([]byte, size)
 	for i := range payload {
 		payload[i] = byte(i*31 + 7)
 	}
-	interimLiveRoundTrip(t, ctx, token, "manyup-interim-multipart.bin", payload)
+	interimLiveRoundTrip(t, ctx, instance, token, "manyup-interim-multipart.bin", payload)
 }
 
 func interimLiveToken(t *testing.T) string {
@@ -68,9 +70,19 @@ func interimLiveToken(t *testing.T) string {
 	return token
 }
 
-func interimLiveVerify(t *testing.T, ctx context.Context, token string) {
+// interimLiveInstance targets the main instance by default. Set INTERIM_BASE_URL
+// to exercise a self-hosted instance.
+func interimLiveInstance() *Interim {
+	base := strings.TrimSpace(os.Getenv("INTERIM_BASE_URL"))
+	if base == "" {
+		base = DefaultInterimBaseURL
+	}
+	return NewInterim(InterimServiceName, base)
+}
+
+func interimLiveVerify(t *testing.T, ctx context.Context, instance *Interim, token string) {
 	t.Helper()
-	if err := (&Interim{}).VerifyCredentials(ctx, plugin.Credentials{"API_TOKEN": token}, nil); err != nil {
+	if err := instance.VerifyCredentials(ctx, plugin.Credentials{"API_TOKEN": token}, nil); err != nil {
 		t.Fatalf("VerifyCredentials: %v", err)
 	}
 	t.Log("credential verified")
@@ -78,10 +90,10 @@ func interimLiveVerify(t *testing.T, ctx context.Context, token string) {
 
 // interimLiveRoundTrip uploads the payload, downloads it through a fresh
 // download link, compares the SHA-256 digest, and deletes the file afterwards.
-func interimLiveRoundTrip(t *testing.T, ctx context.Context, token, filename string, payload []byte) *plugin.UploadResult {
+func interimLiveRoundTrip(t *testing.T, ctx context.Context, instance *Interim, token, filename string, payload []byte) *plugin.UploadResult {
 	t.Helper()
 
-	res, err := (&Interim{}).Upload(ctx, filename,
+	res, err := instance.Upload(ctx, filename,
 		bytes.NewReader(payload), int64(len(payload)),
 		plugin.Credentials{"API_TOKEN": token}, nil)
 	if err != nil {
@@ -97,14 +109,14 @@ func interimLiveRoundTrip(t *testing.T, ctx context.Context, token, filename str
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
 		status, body := interimLiveRequest(t, cleanupCtx, http.MethodDelete,
-			interimBaseURL+"/files/"+url.PathEscape(fileID), token, nil)
+			instance.apiBase()+"/files/"+url.PathEscape(fileID), token, nil)
 		if status != http.StatusNoContent {
 			t.Errorf("delete file: status %d: %s", status, body)
 		}
 	})
 
 	status, body := interimLiveRequest(t, ctx, http.MethodPost,
-		interimBaseURL+"/files/"+url.PathEscape(fileID)+"/download", token, nil)
+		instance.apiBase()+"/files/"+url.PathEscape(fileID)+"/download", token, nil)
 	if status != http.StatusOK {
 		t.Fatalf("create download link: status %d: %s", status, body)
 	}
@@ -145,7 +157,7 @@ func interimLiveRoundTrip(t *testing.T, ctx context.Context, token, filename str
 		}
 
 		status, body = interimLiveRequest(t, ctx, http.MethodPost,
-			interimBaseURL+"/files/"+url.PathEscape(fileID)+"/download", token, nil)
+			instance.apiBase()+"/files/"+url.PathEscape(fileID)+"/download", token, nil)
 		if status != http.StatusOK {
 			t.Fatalf("create download link: status %d: %s", status, body)
 		}

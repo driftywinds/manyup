@@ -7,6 +7,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 ## Features
 
 - **Multi-service uploads** — BuzzHeavier, DataNodes, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, VikingFile, ZincDrive, and 0x0.st out of the box
+- **Self-hosted interim instances** — interim is open source; add any number of instances and upload to them alongside the main one
 - **Parallel or sequential** — upload to all selected services at once, or one at a time
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
 - **Plugin architecture** — add new hosting services by implementing a single Go interface
@@ -27,17 +28,22 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 | [DataNodes](https://datanodes.to) | **Required** (API_TOKEN) | Two-step multipart POST | 3 GB free / unlimited premium |
 | [FuckingFast](https://fuckingfast.net) | Optional (API_TOKEN) | Raw PUT | Unlimited |
 | [GoFile](https://gofile.io) | Optional (API_TOKEN) | Multipart POST | Unlimited |
-| [interim](https://interim.drifty.win) | **Required** (user hash) | Single PUT / S3 multipart | 7 GB |
+| [interim](https://interim.drifty.win) | Optional (user hash; required when the instance restricts uploads) | Single PUT / S3 multipart | Per instance (7 GB on the main instance) |
 | [Mocha](https://mocha.my) | **Required** (API_TOKEN) | Multipart presigned PUT | 20 GiB per file |
 | [PixelDrain](https://pixeldrain.com) | **Required** (API_TOKEN) | Raw PUT | Plan-dependent |
 | [storage.to](https://storage.to) | Optional (API_TOKEN) | init → presigned PUT → confirm | 25 GB free / 100 GB paid |
 | [VikingFile](https://vikingfile.com) | Optional (API_TOKEN) | Streaming multipart | Unlimited |
 | [ZincDrive](https://zincdrive.com) | **Required** (API_TOKEN) | S3 presigned PUT | 10 GB |
 
-interim uploads are authenticated with a user hash; manyup always sends one. On an
-instance with public uploads disabled, the hash must also be approved by the admin.
-Files expire according to the instance's retention period (10 days at the time of
-writing) and storage is capped at 200 GB; `/api/v1/status` is authoritative.
+interim is open source, so anyone can host an instance. manyup ships with the main
+instance (`https://interim.drifty.win`) as the `interim` service and can upload to
+any number of additional instances, each registered as `interim@<name>`.
+
+A user hash is optional. Instances with public uploads enabled accept anonymous
+uploads; instances with public uploads disabled require an admin-approved hash.
+Files expire according to each instance's retention period (10 days, sliding from
+the last download, on the main instance) and storage/file-size limits are set per
+instance; `GET /api/v1/status` is authoritative.
 
 ## Installation
 
@@ -150,11 +156,14 @@ manyup <command> [options]
 | `manyup services` | List available service plugins |
 | `manyup config set <service>` | Prompt for the API token (safe for any characters) |
 | `manyup config set <service> <value>` | Set the API token (key defaults to `API_TOKEN`) |
-| `manyup config set <service> <key> <value>` | Set any credential explicitly |
+| `manyup config set <service> <key> <value>` | Set any credential or option explicitly |
 | `manyup config show` | Show current configuration |
 | `manyup config mode <parallel\|sequential>` | Set upload mode |
 | `manyup config select <service>` | Toggle a service on/off |
 | `manyup config retry <max> [seconds]` | Set retries per service and base backoff delay |
+| `manyup interim list` | List the default and configured interim instances |
+| `manyup interim add <url> [name] [hash]` | Add a self-hosted interim instance (hash optional) |
+| `manyup interim remove <name>` | Remove a configured interim instance |
 | `manyup completion <shell>` | Print a tab-completion script |
 | `manyup where` | Show the binary path, config path, and whether it is on PATH |
 | `manyup version` | Print version |
@@ -203,7 +212,7 @@ manyup upload myfile.zip
 
 ### Configure credentials
 
-Only needed for services that require authentication (currently DataNodes, interim, Mocha, PixelDrain and ZincDrive):
+Only needed for services that require authentication (currently DataNodes, Mocha, PixelDrain and ZincDrive) and for services where you want to tie uploads to an account. interim accepts anonymous uploads on public instances but needs an approved hash on restricted instances:
 
 ```bash
 # Omit the value to paste the token at a prompt — works with any characters
@@ -215,7 +224,7 @@ manyup config set mocha mocha_xxxxxxxxxxxxxxxxx
 # DataNodes (required)
 manyup config set datanodes your_api_key_here
 
-# interim (required — user hash; approval needed when uploads are restricted)
+# interim (optional — needed when the instance restricts uploads; hash must be approved)
 manyup config set interim interim_xxxxxxxxxxxxxxxxx
 
 # ZincDrive (required)
@@ -239,8 +248,69 @@ manyup config set vikingfile your_user_hash
 # storage.to (optional — anonymous uploads expire in 3 days; a token removes the caps)
 manyup config set storageto your_api_token
 
-# Explicit form, for any other credential key
+# Explicit form, for any other credential or option key
 manyup config set gofile API_TOKEN your_gofile_token
+manyup config set gofile folderId your_folder_id
+```
+
+#### Multiple interim instances
+
+The main instance is always available as `interim`. Add a self-hosted instance
+with `manyup interim add`; the instance is registered as `interim@<name>` and
+selected like any other service:
+
+```bash
+# Verify the instance, prompt for an optional approved hash, save, and select it.
+# The name defaults to the hostname (files.example.com here).
+manyup interim add https://files.example.com friends
+
+# List every interim instance, its URL, auth state, and selection
+manyup interim list
+
+# Upload to the main instance and the new one at the same time
+manyup config select interim
+manyup config select interim@friends
+manyup upload myfile.zip
+
+# A restricted instance needs an approved hash instead of anonymous uploads
+manyup config set interim@friends interim_xxxxxxxxxxxxxxxxx
+
+# Stop using one instance, or delete its configuration entirely
+manyup config select interim@friends
+manyup interim remove friends
+```
+
+`interim add` accepts an origin (`https://files.example.com`), optionally with
+an `/api/v1` suffix. A path prefix, query, or fragment is rejected. The optional
+hash is verified against that instance before anything is saved; if the instance
+cannot be reached, it is saved with a warning so a temporary outage does not block
+configuration. Press Enter at the prompt for anonymous uploads.
+
+The default instance can be pointed at another origin by setting its `BASE_URL`
+option, but `manyup interim add` is the normal path for additional instances:
+
+```bash
+# Repoint the default "interim" service at another instance
+manyup config set interim BASE_URL https://files.example.com
+```
+
+Instances are stored in `config.json` as ordinary service entries:
+
+```json
+{
+  "services": {
+    "interim": {
+      "enabled": true,
+      "credentials": { "API_TOKEN": "interim_..." }
+    },
+    "interim@friends": {
+      "enabled": true,
+      "credentials": {},
+      "options": { "BASE_URL": "https://files.example.com" }
+    }
+  },
+  "selected_services": ["interim", "interim@friends"]
+}
 ```
 
 #### Tokens containing shell characters
@@ -290,8 +360,11 @@ $ manyup config set mocha mocha_correct
 ```
 
 Services with a known check: Mocha, GoFile, DataNodes, interim, ZincDrive, BuzzHeavier, PixelDrain.
-For interim the check also consults `/api/v1/status`: an unapproved hash is rejected when
-public uploads are disabled and accepted when they are enabled.
+For interim a hash is checked with `GET /keys/me`; an unapproved hash (and an
+anonymous configuration) is rejected when `public_uploads` is false and accepted
+when it is true. `accepting_uploads: false` is reported as "could not verify"
+rather than as a bad hash, so an instance that is temporarily full does not
+discard a working credential.
 If the service cannot be reached the token is saved with a warning instead, so a temporary
 outage never blocks configuration; VikingFile has no account endpoint, so its token is
 always saved unverified.
@@ -403,6 +476,10 @@ manyup upload myfile.zip
 
 Format: `MANYUP_<SERVICE>_API_TOKEN`
 
+The interim fallback applies to the default instance only. Additional instances
+(`interim@<name>`) read their optional hash from `config.json`, because an `@` is
+not usable in a shell environment variable name.
+
 ### Upload retries
 
 When a service upload fails with a transient error — dropped/reset connections, timeouts, unexpected EOFs, rate limiting (429), or server-side errors (5xx) — manyup automatically retries that service with exponential backoff (jittered so parallel services don't reconnect in lockstep). Permanent failures such as bad requests, auth errors, or 403/404 responses fail immediately without wasting time.
@@ -419,6 +496,11 @@ manyup config retry 0
 ```
 
 Each wait doubles per attempt and is capped at 30 seconds. Retries can also be set in `config.json` via `max_retries` and `retry_delay_seconds`.
+
+interim completion is retried in place for transient finalization states
+(`409 upload_missing`, `409 upload_parts_incomplete`, `409 upload_busy`, and
+`429` rate/concurrency limits), so a storage-still-settling or briefly busy
+instance does not force a multi-gigabyte upload to start over.
 
 ## Architecture
 
@@ -440,13 +522,13 @@ manyup/
 │   │   ├── progress_reader.go       # Streaming progress tracking with smoothed speed
 │   │   └── retry.go                 # Transient-failure classification + backoff
 │   └── services/
-│       ├── registry.go              # Central service registration
+│       ├── registry.go              # Central service registration (adds interim@<name> instances)
 │       ├── verify.go                # Shared credential-check helpers
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
 │       ├── datanodes.go             # DataNodes plugin (two-step multipart API)
 │       ├── fuckingfast.go           # FuckingFast plugin (PUT upload)
 │       ├── gofile.go                # GoFile plugin (multipart upload)
-│       ├── interim.go               # interim plugin (single PUT or S3 multipart)
+│       ├── interim.go               # interim plugin (per-instance, single PUT or S3 multipart)
 │       ├── mocha.go                 # Mocha plugin (multipart presigned + share link)
 │       ├── 0x0.go                   # 0x0.st plugin (multipart POST upload)
 │       ├── pixeldrain.go            # PixelDrain plugin (PUT upload)

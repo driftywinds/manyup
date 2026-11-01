@@ -123,10 +123,14 @@ func (c *AppConfig) Save() error {
 	return os.WriteFile(configPath(), data, 0o600)
 }
 
-// SetCredential sets an API key for a given service.
-func (c *AppConfig) SetCredential(service, key, value string) {
+// ensureService returns the config entry for a service, creating an enabled
+// one with empty credential and option maps when it does not exist yet.
+func (c *AppConfig) ensureService(service string) *ServiceConfig {
+	if c.Services == nil {
+		c.Services = make(map[string]*ServiceConfig)
+	}
 	sc, ok := c.Services[service]
-	if !ok {
+	if !ok || sc == nil {
 		sc = &ServiceConfig{
 			Enabled:     true,
 			Credentials: make(map[string]string),
@@ -137,19 +141,106 @@ func (c *AppConfig) SetCredential(service, key, value string) {
 	if sc.Credentials == nil {
 		sc.Credentials = make(map[string]string)
 	}
+	return sc
+}
+
+// SetCredential sets an API key for a given service.
+func (c *AppConfig) SetCredential(service, key, value string) {
+	sc := c.ensureService(service)
 	sc.Credentials[key] = value
 	sc.Enabled = true
 }
 
-// ToggleService adds or removes a service from the selected list.
-func (c *AppConfig) ToggleService(service string) {
+// SetOption stores a non-secret per-service option (for example the BASE_URL
+// of a self-hosted interim instance). An empty value removes the option.
+func (c *AppConfig) SetOption(service, key, value string) {
+	sc := c.ensureService(service)
+	if sc.Options == nil {
+		sc.Options = make(map[string]string)
+	}
+	if value == "" {
+		delete(sc.Options, key)
+		return
+	}
+	sc.Options[key] = value
+	sc.Enabled = true
+}
+
+// Service returns the stored config for a service and whether it exists.
+func (c *AppConfig) Service(service string) (*ServiceConfig, bool) {
+	if c.Services == nil {
+		return nil, false
+	}
+	sc, ok := c.Services[service]
+	return sc, ok && sc != nil
+}
+
+// RemoveService deletes a service entry and its selection. It reports whether
+// anything was removed.
+func (c *AppConfig) RemoveService(service string) bool {
+	removed := false
+	if c.Services != nil {
+		if _, ok := c.Services[service]; ok {
+			delete(c.Services, service)
+			removed = true
+		}
+	}
+	for i, s := range c.SelectedServices {
+		if s == service {
+			c.SelectedServices = append(c.SelectedServices[:i], c.SelectedServices[i+1:]...)
+			removed = true
+			break
+		}
+	}
+	return removed
+}
+
+// IsSelected reports whether a service is enabled for uploads.
+func (c *AppConfig) IsSelected(service string) bool {
+	for _, s := range c.SelectedServices {
+		if s == service {
+			return true
+		}
+	}
+	return false
+}
+
+// SelectService adds a service to the selected list if it is not there yet. It
+// reports whether the selection changed.
+func (c *AppConfig) SelectService(service string) bool {
+	if c.IsSelected(service) {
+		return false
+	}
+	c.SelectedServices = append(c.SelectedServices, service)
+	return true
+}
+
+// DeselectService removes a service from the selected list. It reports whether
+// the selection changed.
+func (c *AppConfig) DeselectService(service string) bool {
+	if !c.IsSelected(service) {
+		return false
+	}
+	c.RemoveServiceSelection(service)
+	return true
+}
+
+// RemoveServiceSelection removes a service from the selected list without
+// touching its credentials or options.
+func (c *AppConfig) RemoveServiceSelection(service string) {
 	for i, s := range c.SelectedServices {
 		if s == service {
 			c.SelectedServices = append(c.SelectedServices[:i], c.SelectedServices[i+1:]...)
 			return
 		}
 	}
-	c.SelectedServices = append(c.SelectedServices, service)
+}
+
+// ToggleService adds or removes a service from the selected list.
+func (c *AppConfig) ToggleService(service string) {
+	if !c.DeselectService(service) {
+		c.SelectService(service)
+	}
 }
 
 // RetrySettings returns the configured retry behaviour: how many times a

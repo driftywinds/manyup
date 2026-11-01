@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/driftywinds/manyup/internal/config"
+	"github.com/driftywinds/manyup/internal/services"
 )
 
 func TestOnPath(t *testing.T) {
@@ -144,6 +147,61 @@ func TestReadSecretValue(t *testing.T) {
 	}
 }
 
+func TestReadOptionalSecretValue(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "empty line means anonymous", input: "\n", want: ""},
+		{name: "no input means anonymous", input: "", want: ""},
+		{name: "strips CRLF", input: "interim_abc\r\n", want: "interim_abc"},
+		{name: "keeps shell metacharacters", input: "a|b&c^d\n", want: "a|b&c^d"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := readOptionalSecretValue(strings.NewReader(c.input))
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("readOptionalSecretValue(%q) returned %q, want an error", c.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readOptionalSecretValue(%q) returned %v", c.input, err)
+			}
+			if got != c.want {
+				t.Errorf("readOptionalSecretValue(%q) = %q, want %q", c.input, got, c.want)
+			}
+		})
+	}
+}
+
+func TestLooksLikeInterimHash(t *testing.T) {
+	if !looksLikeInterimHash("interim_abcdefghijklmnopqrstuvwxyz") {
+		t.Error("a full interim hash should be recognised")
+	}
+	for _, value := range []string{"", "friends", "files.example.com", "interim_short"} {
+		if looksLikeInterimHash(value) {
+			t.Errorf("%q should not be treated as an interim hash", value)
+		}
+	}
+}
+
+func TestInterimServicesListsDefaultFirst(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SetOption("interim@zeta", "BASE_URL", "https://zeta.example.com")
+	cfg.SetOption("interim@alpha", "BASE_URL", "https://alpha.example.com")
+
+	got := interimServices(cfg)
+	want := []string{"interim", "interim@alpha", "interim@zeta"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("interimServices = %v, want %v", got, want)
+	}
+}
+
 func TestIsCredentialKey(t *testing.T) {
 	for _, key := range []string{"API_TOKEN", "API_KEY", "TOKEN"} {
 		if !isCredentialKey(key) {
@@ -169,10 +227,32 @@ func TestCompletionCandidates(t *testing.T) {
 
 	t.Run("first word", func(t *testing.T) {
 		got := completionCandidates(nil)
-		for _, want := range []string{"upload", "services", "config", "completion", "where"} {
+		for _, want := range []string{"upload", "services", "config", "interim", "completion", "where"} {
 			if !contains(got, want) {
 				t.Errorf("candidates %v missing %q", got, want)
 			}
+		}
+	})
+
+	t.Run("interim subcommands", func(t *testing.T) {
+		got := completionCandidates([]string{"interim"})
+		for _, want := range []string{"add", "list", "remove"} {
+			if !contains(got, want) {
+				t.Errorf("candidates %v missing %q", got, want)
+			}
+		}
+	})
+
+	t.Run("configured instances are offered", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.SetOption("interim@friends", "BASE_URL", "https://friends.example.com")
+		registry := services.AllWithConfig(cfg)
+
+		if got := completionCandidatesFor([]string{"config", "set"}, registry); !contains(got, "interim@friends") {
+			t.Errorf("config set candidates %v missing interim@friends", got)
+		}
+		if got := completionCandidatesFor([]string{"interim", "remove"}, registry); !contains(got, "friends") {
+			t.Errorf("interim remove candidates %v missing friends", got)
 		}
 	})
 
