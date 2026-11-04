@@ -11,6 +11,7 @@ client-rendered, sign-in gated, or have gone offline.
 | Service | Plugin | Auth | Upload method | Max size | Reference |
 |---|---|---|---|---|---|
 | 0x0.st | `0x0.go` | none | `multipart/form-data` POST | 512 MiB | [0x0.md](0x0.md) |
+| AnonMP4 | `anonmp4.go` | none | streaming `multipart/form-data` POST | 20 GB documented; the error example reports a 50 GiB cap | [anonmp4.md](anonmp4.md) |
 | BuzzHeavier | `buzzheavier.go` | optional account id | raw `PUT` | no documented limit | [buzzheavier.md](buzzheavier.md) |
 | DataNodes | `datanodes.go` | **required** key | resolve server + multipart POST | 3 GB free / unlimited premium | [datanodes.md](datanodes.md) |
 | FuckingFast | `fuckingfast.go` | optional account id | raw `PUT` | no documented limit | [fuckingfast.md](fuckingfast.md) |
@@ -54,6 +55,9 @@ Plugins read credentials from a `plugin.Credentials` map. The keys actually used
 The uploader merges env vars of the form `MANYUP_<SERVICE>_<KEY>` into that map, so
 `MANYUP_MOCHA_API_TOKEN` is the env fallback for `manyup config set mocha API_TOKEN ...`.
 
+AnonMP4 and 0x0.st use no credentials at all; they are selectable without any
+configuration.
+
 `manyup config set` accepts the short form `config set <service> <value>`, which fills
 `API_TOKEN` for you.
 
@@ -74,6 +78,7 @@ treated as inconclusive so a working token is never discarded because a host is 
 | BuzzHeavier | `GET https://buzzheavier.com/api/account` | `401` |
 | PixelDrain | `GET https://pixeldrain.com/api/user` (Basic) | `401` |
 | VikingFile | *(none available)* | — saved unverified |
+| AnonMP4 | *(none — anonymous API)* | — no credential to verify |
 
 ### Reliability contract
 

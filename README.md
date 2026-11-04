@@ -6,7 +6,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 ## Features
 
-- **Multi-service uploads** — BuzzHeavier, DataNodes, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, VikingFile, ZincDrive, and 0x0.st out of the box
+- **Multi-service uploads** — AnonMP4, BuzzHeavier, DataNodes, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, VikingFile, ZincDrive, and 0x0.st out of the box
 - **Self-hosted interim instances** — interim is open source; add any number of instances and upload to them alongside the main one
 - **Parallel or sequential** — upload to all selected services at once, or one at a time
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
@@ -23,6 +23,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 | Service | Auth | Upload Method | Max Size |
 |---|---|---|---|
+| [AnonMP4](https://anonmp4.to) | None | Streaming multipart POST | 20 GB |
 | [0x0.st](https://0x0.st) | None | Multipart POST | 512 MB |
 | [BuzzHeavier](https://buzzheavier.com) | Optional (API_TOKEN) | Raw PUT | Unlimited |
 | [DataNodes](https://datanodes.to) | **Required** (API_TOKEN) | Two-step multipart POST | 3 GB free / unlimited premium |
@@ -44,6 +45,11 @@ uploads; instances with public uploads disabled require an admin-approved hash.
 Files expire according to each instance's retention period (10 days, sliding from
 the last download, on the main instance) and storage/file-size limits are set per
 instance; `GET /api/v1/status` is authoritative.
+
+AnonMP4 is video-only and needs no credentials. It accepts major video formats
+(MP4, MKV, AVI, MOV, WebM, and others) up to 20 GB and returns a public watch
+page. Processing is asynchronous, so a freshly uploaded video can take a moment
+to become playable.
 
 ## Installation
 
@@ -395,7 +401,7 @@ lists the subcommands:
 
 ```
 $ manyup config set <TAB>
-0x0  buzzheavier  datanodes  gofile  interim  mocha  pixeldrain  vikingfile  zincdrive
+0x0  anonmp4  buzzheavier  datanodes  gofile  interim  mocha  pixeldrain  vikingfile  zincdrive
 ```
 
 #### cmd.exe
@@ -524,6 +530,7 @@ manyup/
 │   └── services/
 │       ├── registry.go              # Central service registration (adds interim@<name> instances)
 │       ├── verify.go                # Shared credential-check helpers
+│       ├── anonmp4.go               # AnonMP4 plugin (streaming multipart video upload)
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
 │       ├── datanodes.go             # DataNodes plugin (two-step multipart API)
 │       ├── fuckingfast.go           # FuckingFast plugin (PUT upload)
