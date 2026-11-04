@@ -121,9 +121,21 @@ func newAnonMP4TestServer(t *testing.T) *anonMP4TestServer {
 	s.Server = httptest.NewServer(mux)
 	t.Cleanup(s.Close)
 
+	// These tests exercise the documented single-POST fallback. Point the live
+	// node API at a server that refuses allocations so Upload falls through to
+	// the legacy endpoint.
+	nodeUnavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "node unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(nodeUnavailable.Close)
+
 	originalBase := anonMP4APIBase
 	anonMP4APIBase = s.URL
 	t.Cleanup(func() { anonMP4APIBase = originalBase })
+
+	originalNodeBase := anonMP4WebBaseURL
+	anonMP4WebBaseURL = nodeUnavailable.URL
+	t.Cleanup(func() { anonMP4WebBaseURL = originalNodeBase })
 
 	return s
 }

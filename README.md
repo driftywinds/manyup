@@ -23,7 +23,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 | Service | Auth | Upload Method | Max Size |
 |---|---|---|---|
-| [AnonMP4](https://anonmp4.to) | None | Streaming multipart POST | 20 GB |
+| [AnonMP4](https://anonmp4.to) | None | Chunked streaming upload | 20 GB |
 | [0x0.st](https://0x0.st) | None | Multipart POST | 512 MB |
 | [BuzzHeavier](https://buzzheavier.com) | Optional (API_TOKEN) | Raw PUT | Unlimited |
 | [DataNodes](https://datanodes.to) | **Required** (API_TOKEN) | Two-step multipart POST | 3 GB free / unlimited premium |
@@ -50,6 +50,11 @@ AnonMP4 is video-only and needs no credentials. It accepts major video formats
 (MP4, MKV, AVI, MOV, WebM, and others) up to 20 GB and returns a public watch
 page. Processing is asynchronous, so a freshly uploaded video can take a moment
 to become playable.
+
+AnonMP4's documented `POST /upload` route is currently returning Apache 503, so
+manyup uses the same live node/chunk upload flow as the AnonMP4 website: 2 MiB
+chunks, five in flight, with the documented single-POST endpoint kept as a
+fallback.
 
 ## Installation
 
@@ -530,7 +535,7 @@ manyup/
 │   └── services/
 │       ├── registry.go              # Central service registration (adds interim@<name> instances)
 │       ├── verify.go                # Shared credential-check helpers
-│       ├── anonmp4.go               # AnonMP4 plugin (streaming multipart video upload)
+│       ├── anonmp4.go               # AnonMP4 plugin (node/chunk video upload)
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
 │       ├── datanodes.go             # DataNodes plugin (two-step multipart API)
 │       ├── fuckingfast.go           # FuckingFast plugin (PUT upload)

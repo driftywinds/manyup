@@ -11,7 +11,7 @@ client-rendered, sign-in gated, or have gone offline.
 | Service | Plugin | Auth | Upload method | Max size | Reference |
 |---|---|---|---|---|---|
 | 0x0.st | `0x0.go` | none | `multipart/form-data` POST | 512 MiB | [0x0.md](0x0.md) |
-| AnonMP4 | `anonmp4.go` | none | streaming `multipart/form-data` POST | 20 GB documented; the error example reports a 50 GiB cap | [anonmp4.md](anonmp4.md) |
+| AnonMP4 | `anonmp4.go` | none | live node/chunk upload (2 MiB chunks); documented multipart fallback | 20 GB documented; the error example reports a 50 GiB cap | [anonmp4.md](anonmp4.md) |
 | BuzzHeavier | `buzzheavier.go` | optional account id | raw `PUT` | no documented limit | [buzzheavier.md](buzzheavier.md) |
 | DataNodes | `datanodes.go` | **required** key | resolve server + multipart POST | 3 GB free / unlimited premium | [datanodes.md](datanodes.md) |
 | FuckingFast | `fuckingfast.go` | optional account id | raw `PUT` | no documented limit | [fuckingfast.md](fuckingfast.md) |

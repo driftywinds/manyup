@@ -1,40 +1,81 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/driftywinds/manyup/internal/httpclient"
 	"github.com/driftywinds/manyup/internal/plugin"
 )
 
-// anonMP4APIBase is a variable so tests can point the plugin at a local server.
-var anonMP4APIBase = "https://anonmp4api.xyz"
-
 const (
-	// anonMP4UploadPath is the only endpoint the plugin needs. The API also
-	// exposes GET /info/{video_id}, which manyup does not call.
+	// anonMP4WebBase is the website that serves the upload-node control API.
+	anonMP4WebBase = "https://anonmp4.to"
+
+	// anonMP4UploadPath is the documented fallback endpoint.
 	anonMP4UploadPath = "/upload"
 
-	// anonMP4ResponseLimit caps how much of a response is read. A successful
-	// response is a small JSON object; a proxy error can be an HTML page.
+	// anonMP4ResponseLimit caps how much of a control response is read.
 	anonMP4ResponseLimit = 1 << 20
+
+	// anonMP4ChunkSize and anonMP4ChunkParallel mirror the website's browser
+	// uploader: 2 MiB chunks, five in flight at a time.
+	anonMP4ChunkSize     int64 = 2 * 1024 * 1024
+	anonMP4ChunkParallel       = 5
+	anonMP4ChunkRetries        = 3
+
+	// anonMP4ClientToken is the public client token embedded in the AnonMP4
+	// website. It is not an account credential; it identifies the anonymous
+	// upload client to the node allocator.
+	anonMP4ClientToken = "TVRBYTRMcTBwOTRMcTBJYzZNQzQ0TUhkN2M2T0R4N2M2TnEwTTFOYTR4N2E0"
+
+	anonMP4UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 )
 
-// AnonMP4 uploads videos to anonmp4.to, an anonymous video host. The API has
-// no authentication and takes one streaming multipart/form-data POST with the
-// file in a field named "file".
+var (
+	// anonMP4WebBaseURL is a variable so tests can point the node API at a
+	// local server.
+	anonMP4WebBaseURL = anonMP4WebBase
+
+	// anonMP4APIBase is the base of the documented single-POST API. The
+	// documented /upload route is currently returning Apache 503, so it is
+	// only used as a fallback when the upload-node API cannot be reached.
+	anonMP4APIBase = "https://anonmp4api.xyz"
+
+	// anonMP4ChunkRetryDelay is the base backoff for a failed chunk; tests
+	// shrink it.
+	anonMP4ChunkRetryDelay = time.Second
+)
+
+// AnonMP4 uploads videos to anonmp4.to, an anonymous video host.
 //
-// The server accepts videos up to 20 GB and processes them asynchronously; the
-// upload response contains the public watch URL, which is what manyup reports.
+// The public documentation describes one multipart POST to
+// https://anonmp4api.xyz/upload. That route is currently served by an Apache
+// proxy that answers 503, so the plugin uses the same node/chunk upload flow as
+// the AnonMP4 website:
+//
+//  1. POST /get-upload-node with a client token and filename.
+//  2. POST each 2 MiB chunk to the returned upload_url with Content-Range and
+//     query metadata.
+//  3. POST /get-video-node to retrieve the final watch URL.
+//
+// If the node allocator is unavailable, the plugin falls back to the documented
+// single-POST endpoint.
 //
 // See api-refs/anonmp4.md for the full contract.
 type AnonMP4 struct{}
@@ -46,14 +87,14 @@ func RegisterAnonMP4(r *plugin.Registry) {
 func (a *AnonMP4) Name() string        { return "anonmp4" }
 func (a *AnonMP4) DisplayName() string { return "AnonMP4" }
 func (a *AnonMP4) Description() string {
-	return "AnonMP4 anonymous video hosting (20 GB max, streaming multipart upload)"
+	return "AnonMP4 anonymous video hosting (20 GB max, chunked streaming upload)"
 }
 
 // RequiredCredentials is empty: the API is completely anonymous.
 func (a *AnonMP4) RequiredCredentials() []string { return nil }
 
-// SupportsLargeUpload reports true because the file is streamed straight into
-// the multipart body and never buffered in memory.
+// SupportsLargeUpload reports true because chunks are read and uploaded one
+// batch at a time, never buffering the whole file.
 func (a *AnonMP4) SupportsLargeUpload() bool { return true }
 
 // ── Response types ──────────────────────────────────────────────────
@@ -65,7 +106,8 @@ type anonMP4Error struct {
 	Details json.RawMessage `json:"details"`
 }
 
-// anonMP4UploadResponse is the success (and failure) envelope of POST /upload.
+// anonMP4UploadResponse is the success (and failure) envelope of the documented
+// POST /upload endpoint.
 type anonMP4UploadResponse struct {
 	Success    bool          `json:"success"`
 	VideoID    string        `json:"video_id"`
@@ -79,6 +121,27 @@ type anonMP4UploadResponse struct {
 	Error      *anonMP4Error `json:"error"`
 }
 
+// anonMP4Node is the response of POST /get-upload-node.
+type anonMP4Node struct {
+	Status    json.RawMessage `json:"status"`
+	NodeID    string          `json:"node_id"`
+	UploadURL string          `json:"upload_url"`
+	NodeToken string          `json:"node_token"`
+	Message   string          `json:"message"`
+}
+
+// anonMP4VideoInfo is the response of POST /get-video-node.
+type anonMP4VideoInfo struct {
+	Success   bool          `json:"success"`
+	VideoID   string        `json:"video_id"`
+	Title     string        `json:"title"`
+	WatchURL  string        `json:"watch_url"`
+	EmbedURL  string        `json:"embed_url"`
+	DeleteURL string        `json:"delete_url"`
+	Message   string        `json:"message"`
+	Error     *anonMP4Error `json:"error"`
+}
+
 // ── Upload ──────────────────────────────────────────────────────────
 
 func (a *AnonMP4) Upload(
@@ -88,6 +151,377 @@ func (a *AnonMP4) Upload(
 	size int64,
 	creds plugin.Credentials,
 	cfg plugin.Config,
+) (*plugin.UploadResult, error) {
+	if size <= 0 {
+		return nil, fmt.Errorf("anonmp4: cannot upload an empty file")
+	}
+
+	clientToken := anonMP4ClientToken
+	if cfg != nil {
+		if configured := strings.TrimSpace(cfg["client_token"]); configured != "" {
+			clientToken = configured
+		}
+	}
+	uploadName := anonMP4FileName(filename)
+
+	node, nodeErr := a.getUploadNode(ctx, uploadName, clientToken)
+	if nodeErr == nil {
+		if err := a.uploadChunks(ctx, node, uploadName, reader, size); err != nil {
+			return nil, err
+		}
+		info, err := a.getVideoInfo(ctx, node, uploadName, clientToken)
+		if err != nil {
+			return nil, err
+		}
+		return &plugin.UploadResult{
+			Service:  a.Name(),
+			Filename: filename,
+			Size:     size,
+			URL:      info.WatchURL,
+		}, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	// The documented endpoint is dead on the current deployment, but keep it as
+	// a fallback in case the node allocator is unavailable while /upload is
+	// restored.
+	result, legacyErr := a.uploadLegacy(ctx, filename, reader, size)
+	if legacyErr != nil {
+		return nil, fmt.Errorf("anonmp4: node API failed (%v); documented upload also failed: %w", nodeErr, legacyErr)
+	}
+	return result, nil
+}
+
+// ── Live node/chunk flow ───────────────────────────────────────────
+
+func (a *AnonMP4) getUploadNode(ctx context.Context, filename, clientToken string) (*anonMP4Node, error) {
+	status, body, err := anonMP4PostForm(ctx, anonMP4WebBaseURL+"/get-upload-node", map[string]string{
+		"client_token": clientToken,
+		"filename":     filename,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("anonmp4: get-upload-node: %w", err)
+	}
+	if status < 200 || status >= 300 {
+		return nil, statusError("anonmp4: get-upload-node", status, body)
+	}
+
+	var node anonMP4Node
+	if err := json.Unmarshal(body, &node); err != nil {
+		return nil, fmt.Errorf("anonmp4: parsing upload node: %w (body: %s)", err, describeBody(body))
+	}
+	if node.NodeID == "" || node.UploadURL == "" || node.NodeToken == "" {
+		if node.Message != "" {
+			return nil, fmt.Errorf("anonmp4: upload node unavailable: %s", node.Message)
+		}
+		return nil, fmt.Errorf("anonmp4: incomplete upload node response: %s", describeBody(body))
+	}
+	return &node, nil
+}
+
+func (a *AnonMP4) getVideoInfo(ctx context.Context, node *anonMP4Node, filename, clientToken string) (*anonMP4VideoInfo, error) {
+	status, body, err := anonMP4PostForm(ctx, anonMP4WebBaseURL+"/get-video-node", map[string]string{
+		"node_id":      node.NodeID,
+		"node_token":   node.NodeToken,
+		"client_token": clientToken,
+		"filename":     filename,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("anonmp4: get-video-node: %w", err)
+	}
+	if status < 200 || status >= 300 {
+		return nil, statusError("anonmp4: get-video-node", status, body)
+	}
+
+	var info anonMP4VideoInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("anonmp4: parsing video info: %w (body: %s)", err, describeBody(body))
+	}
+	if info.Error != nil {
+		return nil, anonMP4PayloadError(info.Error)
+	}
+	if info.WatchURL == "" {
+		if info.Message != "" {
+			return nil, fmt.Errorf("anonmp4: video info has no watch_url: %s", info.Message)
+		}
+		return nil, fmt.Errorf("anonmp4: video info has no watch_url: %s", describeBody(body))
+	}
+	return &info, nil
+}
+
+// anonMP4Chunk is one slice of the file and its inclusive byte range.
+type anonMP4Chunk struct {
+	index int
+	start int64
+	end   int64
+	data  []byte
+}
+
+// uploadChunks reads the file in 2 MiB slices and uploads each batch of five
+// concurrently. The uploader supplies one forward-only reader, so reading and
+// network writes are interleaved instead of seeking.
+func (a *AnonMP4) uploadChunks(
+	ctx context.Context,
+	node *anonMP4Node,
+	filename string,
+	reader io.Reader,
+	size int64,
+) error {
+	totalChunks := int((size + anonMP4ChunkSize - 1) / anonMP4ChunkSize)
+
+	for first := 1; first <= totalChunks; first += anonMP4ChunkParallel {
+		last := first + anonMP4ChunkParallel - 1
+		if last > totalChunks {
+			last = totalChunks
+		}
+
+		chunks := make([]anonMP4Chunk, 0, last-first+1)
+		for index := first; index <= last; index++ {
+			start := int64(index-1) * anonMP4ChunkSize
+			length := anonMP4ChunkSize
+			if remaining := size - start; remaining < length {
+				length = remaining
+			}
+			data := make([]byte, length)
+			if _, err := io.ReadFull(reader, data); err != nil {
+				return fmt.Errorf("anonmp4: reading chunk %d: %w", index, err)
+			}
+			chunks = append(chunks, anonMP4Chunk{
+				index: index,
+				start: start,
+				end:   start + length - 1,
+				data:  data,
+			})
+		}
+
+		var wg sync.WaitGroup
+		errCh := make(chan error, len(chunks))
+		for _, chunk := range chunks {
+			wg.Add(1)
+			go func(c anonMP4Chunk) {
+				defer wg.Done()
+				if err := a.uploadChunkWithRetry(ctx, node, filename, totalChunks, size, c); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+				}
+			}(chunk)
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (a *AnonMP4) uploadChunkWithRetry(
+	ctx context.Context,
+	node *anonMP4Node,
+	filename string,
+	totalChunks int,
+	size int64,
+	chunk anonMP4Chunk,
+) error {
+	var lastErr error
+	for attempt := 1; attempt <= anonMP4ChunkRetries; attempt++ {
+		err := a.uploadChunk(ctx, node, filename, totalChunks, size, chunk)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt == anonMP4ChunkRetries || !anonMP4RetryableChunkError(err) {
+			break
+		}
+		if !anonMP4Sleep(ctx, anonMP4ChunkRetryDelay*time.Duration(attempt)) {
+			return ctx.Err()
+		}
+	}
+	return lastErr
+}
+
+func (a *AnonMP4) uploadChunk(
+	ctx context.Context,
+	node *anonMP4Node,
+	filename string,
+	totalChunks int,
+	size int64,
+	chunk anonMP4Chunk,
+) error {
+	query := url.Values{}
+	query.Set("file_id", node.NodeToken)
+	query.Set("chunkIndex", strconv.Itoa(chunk.index))
+	query.Set("totalChunks", strconv.Itoa(totalChunks))
+	query.Set("filename", filename)
+
+	endpoint := node.UploadURL
+	if strings.Contains(endpoint, "?") {
+		endpoint += "&" + query.Encode()
+	} else {
+		endpoint += "?" + query.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(chunk.data))
+	if err != nil {
+		return fmt.Errorf("anonmp4: creating chunk %d request: %w", chunk.index, err)
+	}
+	req.ContentLength = int64(len(chunk.data))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Content-Disposition", `attachment; filename="`+anonMP4EncodeURIComponent(filename)+`"`)
+	req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", chunk.start, chunk.end, size))
+	req.Header.Set("X-Uploading-Mode", "parallel")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", anonMP4UserAgent)
+	req.Header.Set("Origin", "https://anonmp4.to")
+	req.Header.Set("Referer", "https://anonmp4.to/")
+
+	resp, err := anonMP4StreamingClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("anonmp4: chunk %d upload failed: %w", chunk.index, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &anonMP4ChunkHTTPError{status: resp.StatusCode, body: body}
+	}
+	if message := anonMP4ChunkRejection(body); message != "" {
+		return fmt.Errorf("anonmp4: chunk %d rejected: %s", chunk.index, message)
+	}
+	return nil
+}
+
+// anonMP4ChunkHTTPError keeps the chunk's HTTP status available to both the
+// per-chunk retry loop and the outer uploader's status-based retry classifier.
+type anonMP4ChunkHTTPError struct {
+	status int
+	body   []byte
+}
+
+func (e *anonMP4ChunkHTTPError) Error() string {
+	return fmt.Sprintf("anonmp4: chunk status %d: %s", e.status, describeBody(e.body))
+}
+
+func anonMP4RetryableChunkError(err error) bool {
+	var httpErr *anonMP4ChunkHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.status == http.StatusRequestTimeout ||
+			httpErr.status == http.StatusTooEarly ||
+			httpErr.status == http.StatusTooManyRequests ||
+			httpErr.status >= 500
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+// anonMP4ChunkRejection extracts an application-level rejection from a 2xx
+// chunk response. The live worker answers with plain range text, which is not
+// JSON and is therefore accepted.
+func anonMP4ChunkRejection(body []byte) string {
+	var payload struct {
+		Status  json.RawMessage `json:"status"`
+		Success *bool           `json:"success"`
+		Message string          `json:"message"`
+		Error   *anonMP4Error   `json:"error"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	if payload.Error != nil {
+		return payload.Error.String()
+	}
+	if payload.Success != nil && !*payload.Success {
+		if payload.Message != "" {
+			return payload.Message
+		}
+		return "upload rejected"
+	}
+	switch strings.TrimSpace(string(payload.Status)) {
+	case "false", "0", `"error"`, `"failed"`:
+		if payload.Message != "" {
+			return payload.Message
+		}
+		return "upload rejected"
+	}
+	return ""
+}
+
+func anonMP4Sleep(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// anonMP4PostForm posts a small multipart form to the website API.
+func anonMP4PostForm(ctx context.Context, endpoint string, fields map[string]string) (int, []byte, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			return 0, nil, fmt.Errorf("writing form field %s: %w", key, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return 0, nil, fmt.Errorf("closing form: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", anonMP4UserAgent)
+	req.Header.Set("Origin", "https://anonmp4.to")
+	req.Header.Set("Referer", "https://anonmp4.to/")
+
+	resp, err := httpclient.Get().Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, anonMP4ResponseLimit))
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("reading response: %w", err)
+	}
+	return resp.StatusCode, data, nil
+}
+
+// anonMP4EncodeURIComponent matches JavaScript's encodeURIComponent for the
+// Content-Disposition filename used by the website uploader.
+func anonMP4EncodeURIComponent(value string) string {
+	escaped := url.QueryEscape(value)
+	escaped = strings.ReplaceAll(escaped, "+", "%20")
+	return strings.NewReplacer(
+		"%21", "!",
+		"%27", "'",
+		"%28", "(",
+		"%29", ")",
+		"%2A", "*",
+		"%7E", "~",
+	).Replace(escaped)
+}
+
+// ── Documented single-POST fallback ────────────────────────────────
+
+func (a *AnonMP4) uploadLegacy(
+	ctx context.Context,
+	filename string,
+	reader io.Reader,
+	size int64,
 ) (*plugin.UploadResult, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("anonmp4: cannot upload an empty file")
@@ -106,8 +540,6 @@ func (a *AnonMP4) Upload(
 	req.Header.Set("Accept", "application/json")
 	req.ContentLength = contentLength
 
-	// A 20 GB upload can legitimately outlive the shared client's five-minute
-	// overall timeout. The request context still cancels the transfer.
 	resp, err := anonMP4StreamingClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("anonmp4: upload failed: %w", err)
@@ -146,8 +578,6 @@ func (a *AnonMP4) Upload(
 }
 
 // anonMP4MultipartBody builds a streaming multipart body with a known length.
-// The exact Content-Length lets the server enforce its own maximum before the
-// whole body arrives and avoids chunked transfer encoding.
 func anonMP4MultipartBody(filename string, reader io.Reader, size int64) (io.Reader, string, int64, error) {
 	boundary, err := anonMP4Boundary()
 	if err != nil {
@@ -157,9 +587,6 @@ func anonMP4MultipartBody(filename string, reader io.Reader, size int64) (io.Rea
 	name := anonMP4FileName(filename)
 	contentType := anonMP4ContentType(name)
 
-	// This mirrors the part headers mime/multipart would write for a file
-	// field, while leaving the file bytes as a streaming section so the body
-	// length can be computed without buffering.
 	prefix := "--" + boundary + "\r\n" +
 		`Content-Disposition: form-data; name="file"; filename="` + anonMP4EscapeQuotes(name) + `"` + "\r\n" +
 		"Content-Type: " + contentType + "\r\n\r\n"
@@ -174,8 +601,6 @@ func anonMP4MultipartBody(filename string, reader io.Reader, size int64) (io.Rea
 	return body, "multipart/form-data; boundary=" + boundary, length, nil
 }
 
-// anonMP4Boundary returns a multipart boundary that cannot appear in the file
-// bytes by accident in practice. The length stays under the RFC 2046 limit.
 func anonMP4Boundary() (string, error) {
 	var raw [18]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -185,7 +610,6 @@ func anonMP4Boundary() (string, error) {
 }
 
 // anonMP4StreamingClient returns the shared client without its overall timeout.
-// Context cancellation (Ctrl+C) still aborts the upload.
 func anonMP4StreamingClient() *http.Client {
 	client := *httpclient.Get()
 	client.Timeout = 0
@@ -194,8 +618,6 @@ func anonMP4StreamingClient() *http.Client {
 
 // ── Errors ─────────────────────────────────────────────────────────
 
-// anonMP4ResponseError turns a non-2xx response into an error that keeps the
-// "status NNN" form the uploader's retry classifier matches.
 func anonMP4ResponseError(status int, body []byte) error {
 	var payload struct {
 		Error *anonMP4Error `json:"error"`
@@ -206,12 +628,10 @@ func anonMP4ResponseError(status int, body []byte) error {
 	return statusError("anonmp4", status, body)
 }
 
-// anonMP4PayloadError reports an error envelope delivered with a 2xx status.
 func anonMP4PayloadError(apiErr *anonMP4Error) error {
 	return fmt.Errorf("anonmp4: %s", apiErr.String())
 }
 
-// String renders the API error code, message, and details compactly.
 func (e *anonMP4Error) String() string {
 	if e == nil {
 		return "unknown error"
@@ -237,9 +657,6 @@ func (e *anonMP4Error) String() string {
 
 // ── File naming and content type ───────────────────────────────────
 
-// anonMP4VideoTypes maps the common video extensions to explicit MIME types.
-// Relying on the host's mime registry is unreliable, especially on Windows,
-// and a generic application/octet-stream part can be rejected by the API.
 var anonMP4VideoTypes = map[string]string{
 	".3g2":  "video/3gpp2",
 	".3gp":  "video/3gpp",
@@ -274,8 +691,6 @@ func anonMP4ContentType(name string) string {
 	return "application/octet-stream"
 }
 
-// anonMP4FileName returns the base name with CR/LF removed so a crafted name
-// cannot inject extra part headers.
 func anonMP4FileName(filename string) string {
 	name := filepath.Base(filename)
 	name = strings.Map(func(r rune) rune {
@@ -290,8 +705,6 @@ func anonMP4FileName(filename string) string {
 	return name
 }
 
-// anonMP4EscapeQuotes escapes the characters that would end the quoted
-// filename parameter, matching mime/multipart's own escaping.
 func anonMP4EscapeQuotes(value string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
 }
