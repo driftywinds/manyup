@@ -52,9 +52,19 @@ page. Processing is asynchronous, so a freshly uploaded video can take a moment
 to become playable.
 
 AnonMP4's documented `POST /upload` route is currently returning Apache 503, so
-manyup uses the same live node/chunk upload flow as the AnonMP4 website: 2 MiB
-chunks, five in flight, with the documented single-POST endpoint kept as a
-fallback.
+manyup uses the same live node/chunk upload flow as the AnonMP4 website, but with
+larger 8 MiB chunks (the worker's per-request latency makes the website's 2 MiB
+chunks much slower), five uploads kept in flight continuously, and a first-chunk
+race across three upload nodes for files of 64 MiB or more. The race avoids
+committing a large upload to a slow or failing worker. The documented single-POST
+endpoint is kept as a fallback.
+
+Chunk tuning is available per service:
+
+```bash
+manyup config set anonmp4 chunk_size_mb 16
+manyup config set anonmp4 chunk_parallel 8
+```
 
 ## Installation
 

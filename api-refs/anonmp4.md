@@ -13,7 +13,7 @@
 | **Endpoints used** | `POST /get-upload-node`, chunk `POST` to the returned `upload_url`, `POST /get-video-node`; `POST /upload` as a fallback |
 | **Public URL** | `watch_url`, e.g. `https://anonmp4.art/v/{video_id}` |
 | **Auth** | None — anonymous uploads |
-| **Upload method** | 2 MiB chunks, up to 5 in flight; documented single multipart POST as fallback |
+| **Upload method** | 8 MiB chunks by default, up to 5 in flight; large files race 3 upload nodes on the first chunk; documented single multipart POST as fallback |
 | **Max file size** | 20 GB documented; the error example reports a 53,687,091,200-byte cap (50 GiB), so treat the server response as authoritative |
 | **Retention** | Not documented; the upload response exposes no expiry metadata |
 
@@ -77,7 +77,22 @@ A successful response is JSON:
 the `file_id` for every chunk and for the final metadata call. `node_id` is used
 for the final metadata call.
 
-### Step 2 — upload 2 MiB chunks
+### Step 2 — upload chunks
+
+The website uses 2 MiB chunks. manyup defaults to 8 MiB chunks because the worker
+has high per-request latency: 2 MiB chunks measured at roughly 0.3–0.9 MiB/s on a
+test connection, while 8 MiB chunks reached about 4 MiB/s. The worker accepted
+16 MiB chunks too. Chunk size and concurrency are configurable with
+`chunk_size_mb` (1–32, default 8) and `chunk_parallel` (1–16, default 5).
+
+For files of at least 64 MiB, manyup also races three freshly allocated upload
+nodes on the first chunk. It reads that chunk once, uploads it to all three
+workers concurrently, keeps the first successful worker, and abandons the others.
+The node pool mixes healthy workers with workers that answer `520`/`525`, return
+Tomcat `400`, or move at a few hundred KB/s; without the race, a bad node can make
+a whole upload slow or fail. The cost is one extra first-chunk copy per losing
+candidate (at most 16 MiB at the defaults). Each candidate has a 30-second
+first-chunk deadline.
 
 For each chunk, POST the raw bytes to `upload_url` with query parameters and
 headers:
@@ -86,7 +101,7 @@ headers:
 POST https://anonmp4-egde-751.juliet32cb69.workers.dev/upload/recever/…?file_id=NODE_TOKEN&chunkIndex=1&totalChunks=3&filename=video.mp4
 Content-Type: application/octet-stream
 Content-Disposition: attachment; filename="video.mp4"
-Content-Range: bytes 0-2097151/4194427
+Content-Range: bytes 0-8388607/25165824
 X-Uploading-Mode: parallel
 ```
 
@@ -94,17 +109,19 @@ X-Uploading-Mode: parallel
 |---|---|
 | `file_id` | The `node_token` returned by step 1 |
 | `chunkIndex` | 1-based chunk number |
-| `totalChunks` | `ceil(size / 2 MiB)` |
+| `totalChunks` | `ceil(size / chunkSize)` |
 | `filename` | Original filename, URL-encoded |
 
 `Content-Disposition` uses JavaScript `encodeURIComponent` on the filename.
 `Content-Range` uses inclusive byte offsets and the total file size. The browser
-uploads five chunks in parallel; manyup does the same.
+uploads five chunks in parallel; manyup keeps five workers busy continuously and
+reads the next chunk as soon as any worker finishes, rather than waiting for a
+fixed batch to complete.
 
 A successful chunk response is `200` with a small plain-text range:
 
 ```
-0-2097151/4194427
+0-8388607/25165824
 ```
 
 The website accepts any 2xx chunk response unless the body is JSON with
@@ -247,26 +264,44 @@ answers Apache `503`.
   does not implement `plugin.CredentialVerifier`; `manyup config select anonmp4`
   is enough to enable it. The optional `client_token` option exists only because
   the website's public token may change.
-- **Primary flow.** `POST /get-upload-node`, then 2 MiB chunks, then
+- **Primary flow.** `POST /get-upload-node`, then chunks, then
   `POST /get-video-node`. The result URL is the `watch_url` from the final call.
-- **Chunking.** `ceil(size / 2 MiB)` chunks; five chunks are read and uploaded
-  per batch. The uploader supplies one forward-only reader, so the plugin reads
-  each batch into a bounded buffer (up to 10 MiB) and uploads it concurrently.
-  No file-sized buffer is allocated.
+- **Chunking.** Default `ceil(size / 8 MiB)` chunks with five workers. The
+  uploader supplies one forward-only reader, so a single producer reads the next
+  chunk only when a worker is free. Memory is bounded by
+  `chunk_size × chunk_parallel` (about 40 MiB at the defaults), never by the file
+  size. The continuous pool replaced an earlier fixed-batch implementation that
+  waited for the slowest chunk in each batch and idled the other workers.
+- **Tuning.** `chunk_size_mb` accepts 1–32 (default 8) and `chunk_parallel`
+  accepts 1–16 (default 5). Both are stored as ordinary service options:
+  `manyup config set anonmp4 chunk_size_mb 16`.
 - **Chunk request.** Query `file_id=node_token`, `chunkIndex`, `totalChunks`,
   `filename`; headers `Content-Type: application/octet-stream`,
   `Content-Disposition` with a `encodeURIComponent` filename, `Content-Range:
   bytes start-end/size`, `X-Uploading-Mode: parallel`. The request also sends a
   browser-like `User-Agent`, `Origin`, and `Referer`.
+- **Node race.** For files at least 64 MiB (and at least 4 chunks), the plugin
+  allocates three nodes, uploads the first chunk to each concurrently, and keeps
+  the first success. Each candidate has a 30-second first-chunk deadline; losing
+  nodes are abandoned with only that chunk. This avoids committing a large file
+  to a worker that answers `520`/`525` or crawls.
 - **Chunk retries.** A failed chunk is retried up to 3 times with 1 s/2 s
-  backoff. Transport errors and `408`/`425`/`429`/`5xx` are retryable; other
-  4xx statuses are not. If all attempts fail, the error keeps the chunk's
+  backoff. Transport errors, `400`, `408`, `425`, `429`, and `5xx` are retryable
+  (the live worker intermittently returns Tomcat `400` for a valid chunk, and the
+  website retries every chunk error); other 4xx statuses are not. A chunk has a
+  90-second request deadline. If all attempts fail, the error keeps the chunk's
   `status NNN` so the outer uploader can retry the file.
+- **Progress.** The plugin reports cumulative uploaded bytes to the uploader
+  through `plugin.ProgressReporter`, so the CLI bar reflects completed chunks
+  instead of bytes read ahead. Without this, a chunked upload could read the
+  whole file immediately and show 0% at the network stage. Reported progress uses
+  the overall average rate rather than the 100 ms instantaneous delta, so speed
+  does not spike on each chunk completion and collapse to 0 B/s between them.
 - **Control calls.** `/get-upload-node` and `/get-video-node` post small
   multipart forms with `client_token`, `filename`, `node_id`, and `node_token`.
-  A failure in node allocation falls back to the documented single-POST
-  endpoint; a failure after chunks have been sent does not, to avoid uploading
-  the file twice.
+  A failure in node allocation before the first chunk falls back to the
+  documented single-POST endpoint. A failure during the node race or after chunks
+  have been sent does not fall back, to avoid uploading the file twice.
 - **Documented fallback.** A streaming multipart body with a single `file` field
   and an exact `Content-Length`. It is only attempted when node allocation fails
   before any file bytes are sent.

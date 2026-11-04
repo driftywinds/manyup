@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/driftywinds/manyup/internal/plugin"
 )
 
 const anonMP4SuccessBody = `{
@@ -363,6 +365,33 @@ func TestAnonMP4RejectsEmptyFile(t *testing.T) {
 		context.Background(), "empty.mp4", strings.NewReader(""), 0, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("err = %v, want an empty-file error", err)
+	}
+}
+
+func TestAnonMP4ChunkSettings(t *testing.T) {
+	chunkSize, parallel := anonMP4ChunkSettings(nil)
+	if chunkSize != anonMP4ChunkSize || parallel != anonMP4ChunkParallel {
+		t.Errorf("defaults = (%d, %d), want (%d, %d)",
+			chunkSize, parallel, anonMP4ChunkSize, anonMP4ChunkParallel)
+	}
+
+	chunkSize, parallel = anonMP4ChunkSettings(plugin.Config{
+		"chunk_size_mb": "16",
+		"chunk_parallel": "8",
+	})
+	if want := int64(16 << 20); chunkSize != want {
+		t.Errorf("chunk size = %d, want %d", chunkSize, want)
+	}
+	if parallel != 8 {
+		t.Errorf("parallel = %d, want 8", parallel)
+	}
+
+	chunkSize, parallel = anonMP4ChunkSettings(plugin.Config{
+		"chunk_size_mb": "0",
+		"chunk_parallel": "999",
+	})
+	if chunkSize != anonMP4ChunkSize || parallel != anonMP4ChunkParallel {
+		t.Errorf("out-of-range settings = (%d, %d), want defaults", chunkSize, parallel)
 	}
 }
 

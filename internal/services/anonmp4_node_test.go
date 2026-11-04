@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -325,15 +326,147 @@ func TestAnonMP4ChunkRejection(t *testing.T) {
 
 func TestAnonMP4EncodeURIComponent(t *testing.T) {
 	cases := map[string]string{
-		"video.mp4":          "video.mp4",
-		"a b.mp4":            "a%20b.mp4",
-		"a&b.mp4":            "a%26b.mp4",
-		"a+b.mp4":            "a%2Bb.mp4",
-		"a'b!(c)*.mp4":       "a'b!(c)*.mp4",
+		"video.mp4":    "video.mp4",
+		"a b.mp4":      "a%20b.mp4",
+		"a&b.mp4":      "a%26b.mp4",
+		"a+b.mp4":      "a%2Bb.mp4",
+		"a'b!(c)*.mp4": "a'b!(c)*.mp4",
 	}
 	for input, want := range cases {
 		if got := anonMP4EncodeURIComponent(input); got != want {
 			t.Errorf("anonMP4EncodeURIComponent(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+// anonMP4RaceServer allocates a new node on every /get-upload-node call. Node 1
+// is slow, node 2 is fast, and node 3 answers 525, so the race must pick node 2.
+type anonMP4RaceServer struct {
+	*httptest.Server
+
+	mu         sync.Mutex
+	nextNode   int32
+	chunks     map[int]map[int]bool
+	videoToken string
+}
+
+func newAnonMP4RaceServer(t *testing.T) *anonMP4RaceServer {
+	t.Helper()
+
+	s := &anonMP4RaceServer{chunks: make(map[int]map[int]bool)}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/get-upload-node", func(w http.ResponseWriter, r *http.Request) {
+		id := int(atomic.AddInt32(&s.nextNode, 1))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":     true,
+			"node_id":    fmt.Sprintf("node-%d", id),
+			"upload_url": fmt.Sprintf("http://%s/chunk/%d", r.Host, id),
+			"node_token": fmt.Sprintf("token-%d", id),
+		})
+	})
+
+	mux.HandleFunc("/chunk/", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/chunk/"))
+		if err != nil {
+			http.Error(w, "bad node", http.StatusBadRequest)
+			return
+		}
+		index, _ := strconv.Atoi(r.URL.Query().Get("chunkIndex"))
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		s.mu.Lock()
+		if s.chunks[id] == nil {
+			s.chunks[id] = make(map[int]bool)
+		}
+		s.chunks[id][index] = true
+		s.mu.Unlock()
+
+		if id == 3 && index == 1 {
+			http.Error(w, "bad gateway", 525)
+			return
+		}
+		if id == 1 && index == 1 {
+			time.Sleep(200 * time.Millisecond)
+		}
+		if id == 2 && index == 1 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	})
+
+	mux.HandleFunc("/get-video-node", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("get-video-node form: %v", err)
+		}
+		s.mu.Lock()
+		s.videoToken = r.FormValue("node_token")
+		s.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success":   true,
+			"video_id":  "race-video",
+			"watch_url": "https://anonmp4.art/v/race-video",
+		})
+	})
+
+	s.Server = httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+
+	originalNodeBase := anonMP4WebBaseURL
+	anonMP4WebBaseURL = s.URL
+	t.Cleanup(func() { anonMP4WebBaseURL = originalNodeBase })
+
+	return s
+}
+
+func (s *anonMP4RaceServer) snapshot() (map[int]map[int]bool, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	chunks := make(map[int]map[int]bool, len(s.chunks))
+	for node, indexes := range s.chunks {
+		copyIndexes := make(map[int]bool, len(indexes))
+		for index := range indexes {
+			copyIndexes[index] = true
+		}
+		chunks[node] = copyIndexes
+	}
+	return chunks, s.videoToken
+}
+
+func TestAnonMP4NodeRacePicksHealthyNode(t *testing.T) {
+	srv := newAnonMP4RaceServer(t)
+
+	originalMin := anonMP4NodeRaceMinSize
+	anonMP4NodeRaceMinSize = 1
+	t.Cleanup(func() { anonMP4NodeRaceMinSize = originalMin })
+
+	size := int(4 * anonMP4ChunkSize)
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	res, err := (&AnonMP4{}).Upload(
+		context.Background(), "race.mp4", bytes.NewReader(payload), int64(size), nil, nil)
+	if err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+	if got, want := res.URL, "https://anonmp4.art/v/race-video"; got != want {
+		t.Errorf("URL = %q, want %q", got, want)
+	}
+
+	chunks, videoToken := srv.snapshot()
+	if got, want := videoToken, "token-2"; got != want {
+		t.Errorf("get-video-node token = %q, want %q", got, want)
+	}
+	if got := chunks[2]; len(got) != 4 || !got[1] || !got[2] || !got[3] || !got[4] {
+		t.Errorf("winner chunks = %v, want 1,2,3,4", got)
+	}
+	if got := chunks[1]; len(got) != 1 || !got[1] {
+		t.Errorf("slow node chunks = %v, want only 1", got)
+	}
+	if got := chunks[3]; len(got) != 1 || !got[1] {
+		t.Errorf("failed node chunks = %v, want only 1", got)
 	}
 }

@@ -255,8 +255,11 @@ func (m *UploadManager) attemptUpload(
 	creds := m.getCredentials(svc.Name())
 	cfg := m.getServiceConfig(svc.Name())
 
-	// Wrap the reader so progress events flow to the display.
+	// Wrap the reader so progress events flow to the display. The reader also
+	// implements plugin.ProgressReporter, letting a chunked plugin report bytes
+	// that have actually been uploaded rather than bytes read ahead.
 	pr := newProgressReader(f, fileSize, svc.Name(), progressCh)
+	ctx = plugin.WithProgressReporter(ctx, pr)
 
 	res, err := svc.Upload(ctx, filename, pr, fileSize, creds, cfg)
 

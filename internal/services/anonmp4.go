@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/driftywinds/manyup/internal/httpclient"
@@ -33,11 +34,30 @@ const (
 	// anonMP4ResponseLimit caps how much of a control response is read.
 	anonMP4ResponseLimit = 1 << 20
 
-	// anonMP4ChunkSize and anonMP4ChunkParallel mirror the website's browser
-	// uploader: 2 MiB chunks, five in flight at a time.
-	anonMP4ChunkSize     int64 = 2 * 1024 * 1024
-	anonMP4ChunkParallel       = 5
-	anonMP4ChunkRetries        = 3
+	// anonMP4ChunkSize is deliberately larger than the website's 2 MiB chunk.
+	// The upload worker has high per-request latency, so 2 MiB chunks measured
+	// at 0.3-0.9 MiB/s while 8 MiB chunks reached about 4 MiB/s on the same
+	// connection. The worker accepts at least 16 MiB chunks.
+	anonMP4ChunkSize int64 = 8 * 1024 * 1024
+
+	// anonMP4ChunkParallel keeps five uploads in flight, matching the website's
+	// browser concurrency.
+	anonMP4ChunkParallel = 5
+	anonMP4ChunkRetries  = 3
+
+	// anonMP4ChunkTimeout bounds a single chunk request. The worker occasionally
+	// leaves a request hanging; without a deadline one bad chunk can stall the
+	// whole upload indefinitely.
+	anonMP4ChunkTimeout = 90 * time.Second
+
+	// anonMP4NodeCandidates is how many upload nodes are raced for the first
+	// chunk of a large file. The node pool mixes healthy workers with ones that
+	// answer 520/525 or move at a few hundred KB/s; the first successful first
+	// chunk identifies a usable node.
+	anonMP4NodeCandidates = 3
+
+	// anonMP4NodeRaceTimeout bounds each candidate's first-chunk upload.
+	anonMP4NodeRaceTimeout = 30 * time.Second
 
 	// anonMP4ClientToken is the public client token embedded in the AnonMP4
 	// website. It is not an account credential; it identifies the anonymous
@@ -60,6 +80,10 @@ var (
 	// anonMP4ChunkRetryDelay is the base backoff for a failed chunk; tests
 	// shrink it.
 	anonMP4ChunkRetryDelay = time.Second
+
+	// anonMP4NodeRaceMinSize is the file size at which the first-chunk node
+	// race starts. It is a variable so tests can lower the threshold.
+	anonMP4NodeRaceMinSize int64 = 64 << 20
 )
 
 // AnonMP4 uploads videos to anonmp4.to, an anonymous video host.
@@ -70,7 +94,7 @@ var (
 // the AnonMP4 website:
 //
 //  1. POST /get-upload-node with a client token and filename.
-//  2. POST each 2 MiB chunk to the returned upload_url with Content-Range and
+//  2. POST each 8 MiB chunk to the returned upload_url with Content-Range and
 //     query metadata.
 //  3. POST /get-video-node to retrieve the final watch URL.
 //
@@ -163,10 +187,16 @@ func (a *AnonMP4) Upload(
 		}
 	}
 	uploadName := anonMP4FileName(filename)
+	chunkSize, chunkParallel := anonMP4ChunkSettings(cfg)
+	totalChunks := int((size + chunkSize - 1) / chunkSize)
+
+	if totalChunks >= 4 && size >= anonMP4NodeRaceMinSize {
+		return a.uploadWithNodeRace(ctx, filename, uploadName, reader, size, chunkSize, chunkParallel, clientToken)
+	}
 
 	node, nodeErr := a.getUploadNode(ctx, uploadName, clientToken)
 	if nodeErr == nil {
-		if err := a.uploadChunks(ctx, node, uploadName, reader, size); err != nil {
+		if err := a.uploadChunks(ctx, node, uploadName, reader, size, chunkSize, chunkParallel, 1, 0); err != nil {
 			return nil, err
 		}
 		info, err := a.getVideoInfo(ctx, node, uploadName, clientToken)
@@ -194,7 +224,184 @@ func (a *AnonMP4) Upload(
 	return result, nil
 }
 
+// uploadWithNodeRace is used for larger files. It reads the first chunk once,
+// then uploads that same chunk to several freshly allocated nodes concurrently.
+// The first successful node is kept and the rest are abandoned, so a slow or
+// broken worker only costs the first chunk instead of the whole file.
+func (a *AnonMP4) uploadWithNodeRace(
+	ctx context.Context,
+	filename, uploadName string,
+	reader io.Reader,
+	size, chunkSize int64,
+	chunkParallel int,
+	clientToken string,
+) (*plugin.UploadResult, error) {
+	totalChunks := int((size + chunkSize - 1) / chunkSize)
+
+	first, err := anonMP4ReadChunk(reader, 1, chunkSize, size)
+	if err != nil {
+		return nil, fmt.Errorf("anonmp4: reading first chunk: %w", err)
+	}
+
+	nodes, err := a.allocateNodes(ctx, uploadName, clientToken, anonMP4NodeCandidates)
+	if err != nil {
+		return nil, err
+	}
+
+	winner, err := a.raceFirstChunk(ctx, nodes, uploadName, totalChunks, size, first)
+	if err != nil {
+		return nil, err
+	}
+	if reporter, ok := plugin.ProgressReporterFromContext(ctx); ok {
+		reporter.ReportUploaded(int64(len(first.data)))
+	}
+
+	if err := a.uploadChunks(ctx, winner, uploadName, reader, size, chunkSize,
+		chunkParallel, 2, int64(len(first.data))); err != nil {
+		return nil, err
+	}
+
+	info, err := a.getVideoInfo(ctx, winner, uploadName, clientToken)
+	if err != nil {
+		return nil, err
+	}
+	return &plugin.UploadResult{
+		Service:  a.Name(),
+		Filename: filename,
+		Size:     size,
+		URL:      info.WatchURL,
+	}, nil
+}
+
+type anonMP4NodeResult struct {
+	node *anonMP4Node
+	err  error
+}
+
+func (a *AnonMP4) allocateNodes(ctx context.Context, filename, clientToken string, count int) ([]*anonMP4Node, error) {
+	results := make(chan anonMP4NodeResult, count)
+	for i := 0; i < count; i++ {
+		go func() {
+			node, err := a.getUploadNode(ctx, filename, clientToken)
+			results <- anonMP4NodeResult{node: node, err: err}
+		}()
+	}
+
+	nodes := make([]*anonMP4Node, 0, count)
+	seen := make(map[string]bool, count)
+	var firstErr error
+	for i := 0; i < count; i++ {
+		result := <-results
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+			}
+			continue
+		}
+		if result.node == nil || seen[result.node.UploadURL] {
+			continue
+		}
+		seen[result.node.UploadURL] = true
+		nodes = append(nodes, result.node)
+	}
+	if len(nodes) == 0 {
+		if firstErr != nil {
+			return nil, fmt.Errorf("anonmp4: no upload node available: %w", firstErr)
+		}
+		return nil, fmt.Errorf("anonmp4: no upload node available")
+	}
+	return nodes, nil
+}
+
+type anonMP4RaceResult struct {
+	node *anonMP4Node
+	err  error
+}
+
+func (a *AnonMP4) raceFirstChunk(
+	ctx context.Context,
+	nodes []*anonMP4Node,
+	filename string,
+	totalChunks int,
+	size int64,
+	chunk anonMP4Chunk,
+) (*anonMP4Node, error) {
+	raceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan anonMP4RaceResult, len(nodes))
+	for _, node := range nodes {
+		go func(node *anonMP4Node) {
+			chunkCtx, chunkCancel := context.WithTimeout(raceCtx, anonMP4NodeRaceTimeout)
+			defer chunkCancel()
+			err := a.uploadChunk(chunkCtx, node, filename, totalChunks, size, chunk)
+			results <- anonMP4RaceResult{node: node, err: err}
+		}(node)
+	}
+
+	var firstErr error
+	for range nodes {
+		result := <-results
+		if result.err == nil {
+			cancel()
+			return result.node, nil
+		}
+		if firstErr == nil {
+			firstErr = result.err
+		}
+	}
+	if firstErr == nil {
+		firstErr = fmt.Errorf("all candidates failed")
+	}
+	return nil, fmt.Errorf("anonmp4: no upload node accepted the first chunk: %w", firstErr)
+}
+
+func anonMP4ReadChunk(reader io.Reader, index int, chunkSize, size int64) (anonMP4Chunk, error) {
+	start := int64(index-1) * chunkSize
+	length := chunkSize
+	if remaining := size - start; remaining < length {
+		length = remaining
+	}
+	if length <= 0 {
+		return anonMP4Chunk{}, fmt.Errorf("invalid chunk %d length %d", index, length)
+	}
+
+	data := make([]byte, length)
+	if _, err := io.ReadFull(reader, data); err != nil {
+		return anonMP4Chunk{}, err
+	}
+	return anonMP4Chunk{
+		index: index,
+		start: start,
+		end:   start + length - 1,
+		data:  data,
+	}, nil
+}
+
 // ── Live node/chunk flow ───────────────────────────────────────────
+
+// anonMP4ChunkSettings reads the optional tuning options. The defaults were
+// chosen from measurements against the live worker; larger chunks amortize its
+// per-request latency, and more workers help on high-bandwidth links.
+func anonMP4ChunkSettings(cfg plugin.Config) (chunkSize int64, parallel int) {
+	chunkSize = anonMP4ChunkSize
+	parallel = anonMP4ChunkParallel
+	if cfg == nil {
+		return chunkSize, parallel
+	}
+
+	if raw := strings.TrimSpace(cfg["chunk_size_mb"]); raw != "" {
+		if megabytes, err := strconv.Atoi(raw); err == nil && megabytes >= 1 && megabytes <= 32 {
+			chunkSize = int64(megabytes) << 20
+		}
+	}
+	if raw := strings.TrimSpace(cfg["chunk_parallel"]); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 1 && n <= 16 {
+			parallel = n
+		}
+	}
+	return chunkSize, parallel
+}
 
 func (a *AnonMP4) getUploadNode(ctx context.Context, filename, clientToken string) (*anonMP4Node, error) {
 	status, body, err := anonMP4PostForm(ctx, anonMP4WebBaseURL+"/get-upload-node", map[string]string{
@@ -259,65 +466,108 @@ type anonMP4Chunk struct {
 	data  []byte
 }
 
-// uploadChunks reads the file in 2 MiB slices and uploads each batch of five
-// concurrently. The uploader supplies one forward-only reader, so reading and
-// network writes are interleaved instead of seeking.
+// uploadChunks keeps the requested number of chunk uploads in flight
+// continuously. The uploader supplies one forward-only reader, so a single
+// producer reads the next chunk as soon as a worker is free. There is
+// deliberately no batch barrier: waiting for the slowest chunk in a fixed group
+// would idle the other workers and make the progress bar sit at 0 B/s between
+// groups.
 func (a *AnonMP4) uploadChunks(
 	ctx context.Context,
 	node *anonMP4Node,
 	filename string,
 	reader io.Reader,
-	size int64,
+	size, chunkSize int64,
+	parallel, startIndex int,
+	initialUploaded int64,
 ) error {
-	totalChunks := int((size + anonMP4ChunkSize - 1) / anonMP4ChunkSize)
+	if parallel < 1 {
+		parallel = 1
+	}
+	if startIndex < 1 {
+		startIndex = 1
+	}
+	totalChunks := int((size + chunkSize - 1) / chunkSize)
 
-	for first := 1; first <= totalChunks; first += anonMP4ChunkParallel {
-		last := first + anonMP4ChunkParallel - 1
-		if last > totalChunks {
-			last = totalChunks
-		}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-		chunks := make([]anonMP4Chunk, 0, last-first+1)
-		for index := first; index <= last; index++ {
-			start := int64(index-1) * anonMP4ChunkSize
-			length := anonMP4ChunkSize
-			if remaining := size - start; remaining < length {
-				length = remaining
-			}
-			data := make([]byte, length)
-			if _, err := io.ReadFull(reader, data); err != nil {
-				return fmt.Errorf("anonmp4: reading chunk %d: %w", index, err)
-			}
-			chunks = append(chunks, anonMP4Chunk{
-				index: index,
-				start: start,
-				end:   start + length - 1,
-				data:  data,
-			})
-		}
+	reporter, _ := plugin.ProgressReporterFromContext(ctx)
+	var uploaded atomic.Int64
+	uploaded.Store(initialUploaded)
 
-		var wg sync.WaitGroup
-		errCh := make(chan error, len(chunks))
-		for _, chunk := range chunks {
-			wg.Add(1)
-			go func(c anonMP4Chunk) {
-				defer wg.Done()
-				if err := a.uploadChunkWithRetry(ctx, node, filename, totalChunks, size, c); err != nil {
-					select {
-					case errCh <- err:
-					default:
-					}
+	var (
+		firstErrOnce sync.Once
+		firstErr     error
+	)
+	recordErr := func(err error) {
+		firstErrOnce.Do(func() {
+			firstErr = err
+			cancel()
+		})
+	}
+
+	// Unbuffered: the producer reads exactly one chunk ahead per free worker, so
+	// memory stays bounded and disk reads track upload completions.
+	jobs := make(chan anonMP4Chunk)
+
+	var workers sync.WaitGroup
+	for worker := 0; worker < parallel; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for chunk := range jobs {
+				if ctx.Err() != nil {
+					return
 				}
-			}(chunk)
+				if err := a.uploadChunkWithRetry(ctx, node, filename, totalChunks, size, chunk); err != nil {
+					recordErr(err)
+					return
+				}
+				if reporter != nil {
+					reporter.ReportUploaded(uploaded.Add(int64(len(chunk.data))))
+				}
+			}
+		}()
+	}
+
+produce:
+	for index := startIndex; index <= totalChunks; index++ {
+		if ctx.Err() != nil {
+			break
 		}
-		wg.Wait()
-		close(errCh)
-		for err := range errCh {
-			return err
+
+		start := int64(index-1) * chunkSize
+		length := chunkSize
+		if remaining := size - start; remaining < length {
+			length = remaining
+		}
+		data := make([]byte, length)
+		if _, err := io.ReadFull(reader, data); err != nil {
+			recordErr(fmt.Errorf("anonmp4: reading chunk %d: %w", index, err))
+			break
+		}
+
+		chunk := anonMP4Chunk{
+			index: index,
+			start: start,
+			end:   start + length - 1,
+			data:  data,
+		}
+		select {
+		case jobs <- chunk:
+		case <-ctx.Done():
+			break produce
 		}
 	}
 
-	return nil
+	close(jobs)
+	workers.Wait()
+
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
 }
 
 func (a *AnonMP4) uploadChunkWithRetry(
@@ -335,7 +585,7 @@ func (a *AnonMP4) uploadChunkWithRetry(
 			return nil
 		}
 		lastErr = err
-		if attempt == anonMP4ChunkRetries || !anonMP4RetryableChunkError(err) {
+		if attempt == anonMP4ChunkRetries || !anonMP4RetryableChunkError(ctx, err) {
 			break
 		}
 		if !anonMP4Sleep(ctx, anonMP4ChunkRetryDelay*time.Duration(attempt)) {
@@ -366,7 +616,10 @@ func (a *AnonMP4) uploadChunk(
 		endpoint += "?" + query.Encode()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(chunk.data))
+	chunkCtx, cancel := context.WithTimeout(ctx, anonMP4ChunkTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(chunkCtx, http.MethodPost, endpoint, bytes.NewReader(chunk.data))
 	if err != nil {
 		return fmt.Errorf("anonmp4: creating chunk %d request: %w", chunk.index, err)
 	}
@@ -407,15 +660,29 @@ func (e *anonMP4ChunkHTTPError) Error() string {
 	return fmt.Sprintf("anonmp4: chunk status %d: %s", e.status, describeBody(e.body))
 }
 
-func anonMP4RetryableChunkError(err error) bool {
+func anonMP4RetryableChunkError(ctx context.Context, err error) bool {
+	// A parent cancellation or deadline means the user (or the outer uploader)
+	// stopped this attempt; retrying a chunk cannot help.
+	if ctx.Err() != nil {
+		return false
+	}
 	var httpErr *anonMP4ChunkHTTPError
 	if errors.As(err, &httpErr) {
-		return httpErr.status == http.StatusRequestTimeout ||
+		// 400 is normally permanent, but the live worker's origin occasionally
+		// answers 400 for a valid chunk (the website retries every chunk error
+		// for the same reason). Retry it along with the usual transient codes.
+		return httpErr.status == http.StatusBadRequest ||
+			httpErr.status == http.StatusRequestTimeout ||
 			httpErr.status == http.StatusTooEarly ||
 			httpErr.status == http.StatusTooManyRequests ||
 			httpErr.status >= 500
 	}
-	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	// errors.Is(DeadlineExceeded) here is the per-chunk timeout, not the parent
+	// context (checked above), so a retry is worthwhile.
+	return true
 }
 
 // anonMP4ChunkRejection extracts an application-level rejection from a 2xx

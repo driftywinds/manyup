@@ -69,6 +69,31 @@ type CredentialVerifier interface {
 	VerifyCredentials(ctx context.Context, creds Credentials, cfg Config) error
 }
 
+// ProgressReporter receives uploaded-byte counts from plugins that buffer ahead
+// of the network. A plugin with multipart or chunked uploads can read several
+// chunks before the first one finishes; without this, the CLI can only observe
+// bytes read and the bar would sit at 0 B/s while the network is busy.
+//
+// It is optional. A plugin that does not use it is displayed from bytes read as
+// before. Reports are cumulative, not incremental.
+type ProgressReporter interface {
+	ReportUploaded(bytes int64)
+}
+
+type progressReporterKey struct{}
+
+// WithProgressReporter attaches an uploaded-bytes reporter to a context.
+func WithProgressReporter(ctx context.Context, reporter ProgressReporter) context.Context {
+	return context.WithValue(ctx, progressReporterKey{}, reporter)
+}
+
+// ProgressReporterFromContext returns the reporter attached by the uploader,
+// if any.
+func ProgressReporterFromContext(ctx context.Context) (ProgressReporter, bool) {
+	reporter, ok := ctx.Value(progressReporterKey{}).(ProgressReporter)
+	return reporter, ok
+}
+
 // Registry holds all registered service plugins.
 type Registry struct {
 	mu      sync.RWMutex
