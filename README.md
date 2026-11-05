@@ -75,6 +75,29 @@ freshly uploaded video may take time to become playable.
 
 ## Installation
 
+### Windows — winget
+
+The package is submitted to the winget community repository as
+`DriftyWinds.Manyup`. Once it is accepted, install it with:
+
+```powershell
+winget install --id DriftyWinds.Manyup -e
+```
+
+Winget installs the standard Windows build as a per-user portable package and
+creates the `manyup` command alias itself; no installer or PATH script is
+needed. Open a new terminal after installing.
+
+`manyup -U` continues to work because the winget package directory is under
+`%LOCALAPPDATA%` and is writable by the user. Winget does not learn about a
+self-update, however. The manifest sets `RequireExplicitUpgrade`, so
+`winget upgrade --all` will not overwrite a newer binary. To keep winget’s
+metadata in sync instead, use:
+
+```powershell
+winget upgrade --id DriftyWinds.Manyup -e
+```
+
 ### Windows — installer script
 
 The script downloads the latest release into `%LOCALAPPDATA%\Programs\manyup`, adds that
@@ -631,6 +654,22 @@ go run . upload myfile.zip
 go run . services
 go run . config show
 ```
+
+### Winget package
+
+The package identifier is `DriftyWinds.Manyup`; the first submission is the
+manifest set under `manifests/d/DriftyWinds/Manyup/` in
+[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs). The release
+workflow’s `winget` job uses
+[wingetcreate](https://github.com/microsoft/winget-create) to update that
+manifest after each GitHub release.
+
+The repository secret `WINGET_TOKEN` must contain a classic PAT with
+`public_repo` (or equivalent fine-grained access) so the workflow can open the
+updating PR. The first package must be merged before the automated job can
+update it. Use the standard `manyup-windows-amd64.exe` asset, not the
+`-portable` build: winget’s “portable” type only means it installs a raw
+executable, while manyup’s `-portable` build stores config next to the exe.
 
 ## License
 

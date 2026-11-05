@@ -99,3 +99,25 @@ jobs:
           name: manyup ${{ inputs.tag }}
           generate_release_notes: true
           files: binaries/*
+
+  winget:
+    needs: release
+    runs-on: windows-latest
+    steps:
+      - name: Submit winget update
+        shell: pwsh
+        env:
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          DOTNET_ROLL_FORWARD: LatestMajor
+        run: |
+          $tag = "${{ inputs.tag }}"
+          $version = $tag.TrimStart('v')
+          $url = "https://github.com/driftywinds/manyup/releases/download/$tag/manyup-windows-amd64.exe"
+
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+
+          .\wingetcreate.exe update DriftyWinds.Manyup `
+            --version $version `
+            --urls $url `
+            --submit `
+            --no-open
