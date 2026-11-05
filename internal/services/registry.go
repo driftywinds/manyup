@@ -31,6 +31,7 @@ func buildRegistry(cfg *config.AppConfig) *plugin.Registry {
 	r := plugin.NewRegistry()
 	// Each service's init() calls r.Register(), but since init runs on import
 	// we register explicitly here for clarity and testability.
+	RegisterAbyss(r)
 	RegisterAnonMP4(r)
 	RegisterBuzzHeavier(r)
 	RegisterDataNodes(r)

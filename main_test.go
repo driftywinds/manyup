@@ -109,6 +109,120 @@ func TestParseSetArgs(t *testing.T) {
 	}
 }
 
+func TestParseUploadArgs(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.bin")
+	second := filepath.Join(dir, "second.bin")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := []struct {
+		name        string
+		args        []string
+		wantFiles   []string
+		wantSources []string
+		wantErr     bool
+	}{
+		{
+			name:      "files only",
+			args:      []string{first, second},
+			wantFiles: []string{first, second},
+		},
+		{
+			name:        "space separated sources",
+			args:        []string{first, "-s", "anonmp4", "abyss"},
+			wantFiles:   []string{first},
+			wantSources: []string{"anonmp4", "abyss"},
+		},
+		{
+			name:        "inline comma separated sources",
+			args:        []string{first, "--sources=anonmp4,abyss"},
+			wantFiles:   []string{first},
+			wantSources: []string{"anonmp4", "abyss"},
+		},
+		{
+			name:        "sources before an existing file",
+			args:        []string{"-s", "anonmp4", first},
+			wantFiles:   []string{first},
+			wantSources: []string{"anonmp4"},
+		},
+		{
+			name:        "duplicate sources are removed",
+			args:        []string{first, "-s", "anonmp4", "AnonMP4"},
+			wantFiles:   []string{first},
+			wantSources: []string{"anonmp4"},
+		},
+		{
+			name:        "end of flags",
+			args:        []string{"--", first, second},
+			wantFiles:   []string{first, second},
+			wantSources: nil,
+		},
+		{name: "no files", args: []string{"-s", "anonmp4"}, wantErr: true},
+		{name: "no sources after flag", args: []string{first, "-s"}, wantErr: true},
+		{name: "unknown source", args: []string{first, "-s", "nope"}, wantErr: true},
+		{name: "unknown flag", args: []string{first, "--bogus"}, wantErr: true},
+	}
+
+	registry := services.All()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseUploadArgs(c.args, registry)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("parseUploadArgs(%q) returned no error", c.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseUploadArgs(%q): %v", c.args, err)
+			}
+			if strings.Join(got.files, "|") != strings.Join(c.wantFiles, "|") {
+				t.Errorf("files = %v, want %v", got.files, c.wantFiles)
+			}
+			if strings.Join(got.sources, "|") != strings.Join(c.wantSources, "|") {
+				t.Errorf("sources = %v, want %v", got.sources, c.wantSources)
+			}
+			if c.wantSources != nil && !got.hasSources {
+				t.Error("hasSources = false, want true")
+			}
+		})
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestUploadSourceCompletion(t *testing.T) {
+	start := completionCandidates([]string{"upload", "movie.mkv", "-s"})
+	for _, want := range []string{"abyss", "anonmp4", "gofile"} {
+		if !containsString(start, want) {
+			t.Errorf("source candidates %v missing %q", start, want)
+		}
+	}
+
+	afterOne := completionCandidates([]string{"upload", "movie.mkv", "-s", "anonmp4"})
+	if containsString(afterOne, "anonmp4") {
+		t.Errorf("already-selected source is still offered: %v", afterOne)
+	}
+	if !containsString(afterOne, "abyss") {
+		t.Errorf("source candidates %v missing abyss", afterOne)
+	}
+
+	if got := completionCandidates([]string{"upload", "movie.mkv"}); got != nil {
+		t.Errorf("candidates without -s = %v, want none", got)
+	}
+}
+
 func TestReadSecretValue(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -267,7 +381,7 @@ func TestCompletionCandidates(t *testing.T) {
 
 	t.Run("config set offers every service", func(t *testing.T) {
 		got := completionCandidates([]string{"config", "set"})
-		for _, want := range []string{"mocha", "gofile", "pixeldrain", "vikingfile", "zincdrive", "buzzheavier", "datanodes", "anonmp4", "0x0"} {
+		for _, want := range []string{"mocha", "gofile", "pixeldrain", "vikingfile", "zincdrive", "buzzheavier", "datanodes", "anonmp4", "abyss", "0x0"} {
 			if !contains(got, want) {
 				t.Errorf("candidates %v missing %q", got, want)
 			}

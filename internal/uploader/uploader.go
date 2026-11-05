@@ -40,6 +40,11 @@ type MultiResult struct {
 type UploadManager struct {
 	registry *plugin.Registry
 	cfg      *config.AppConfig
+
+	// selectedOverride, when hasSelectedOverride is true, replaces the config's
+	// selected services for this manager only (the upload command's -s flag).
+	selectedOverride    []string
+	hasSelectedOverride bool
 }
 
 // New creates an UploadManager.
@@ -48,6 +53,13 @@ func New(registry *plugin.Registry, cfg *config.AppConfig) *UploadManager {
 		registry: registry,
 		cfg:      cfg,
 	}
+}
+
+// SetSelectedServices overrides the config-selected services for this manager.
+// It is used by `manyup upload -s ...`; the config file is not modified.
+func (m *UploadManager) SetSelectedServices(names []string) {
+	m.selectedOverride = append([]string(nil), names...)
+	m.hasSelectedOverride = true
 }
 
 // UploadFile uploads a single file to all selected services.
@@ -278,8 +290,13 @@ func (m *UploadManager) retrySettings() (maxRetries int, baseDelay time.Duration
 
 // resolveServices returns the list of Uploader instances for the selected services.
 func (m *UploadManager) resolveServices() []plugin.Uploader {
+	names := m.cfg.SelectedServices
+	if m.hasSelectedOverride {
+		names = m.selectedOverride
+	}
+
 	var out []plugin.Uploader
-	for _, name := range m.cfg.SelectedServices {
+	for _, name := range names {
 		if u, ok := m.registry.Get(name); ok {
 			out = append(out, u)
 		}
@@ -292,7 +309,7 @@ func (m *UploadManager) validateCredentials(svc plugin.Uploader) error {
 	creds := m.getCredentials(svc.Name())
 	for _, key := range svc.RequiredCredentials() {
 		if _, ok := creds[key]; !ok {
-			return fmt.Errorf("missing credential %q (set via config or env %s_%s)", key, "MANYUP", key)
+			return fmt.Errorf("missing credential %q (set via config or env MANYUP_%s_%s)", key, uppercase(svc.Name()), key)
 		}
 	}
 	return nil

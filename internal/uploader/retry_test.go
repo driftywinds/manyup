@@ -119,6 +119,42 @@ func uploadViaManager(t *testing.T, mgr *UploadManager, path string) (*MultiResu
 	return res, err
 }
 
+func TestUploadManagerSelectedOverride(t *testing.T) {
+	first := &fakeUploader{name: "first"}
+	second := &fakeUploader{name: "second"}
+	reg := plugin.NewRegistry()
+	reg.Register(first)
+	reg.Register(second)
+	cfg := &config.AppConfig{
+		SelectedServices: []string{"first"},
+		UploadMode:       config.ModeParallel,
+		Services:         map[string]*config.ServiceConfig{},
+	}
+	filePath := filepath.Join(t.TempDir(), "override.bin")
+	if err := os.WriteFile(filePath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := New(reg, cfg)
+	mgr.SetSelectedServices([]string{"second"})
+	result, err := uploadViaManager(t, mgr, filePath)
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	if got, want := len(result.Results), 1; got != want {
+		t.Fatalf("results = %d, want %d", got, want)
+	}
+	if got, want := result.Results[0].Service, "second"; got != want {
+		t.Errorf("uploaded service = %q, want %q", got, want)
+	}
+	if first.calls != 0 {
+		t.Errorf("config-selected service was called %d times, want 0", first.calls)
+	}
+	if second.calls != 1 {
+		t.Errorf("override service was called %d times, want 1", second.calls)
+	}
+}
+
 func writeTestFile(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "file.bin")

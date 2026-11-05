@@ -186,7 +186,7 @@ func (a *AnonMP4) Upload(
 			clientToken = configured
 		}
 	}
-	uploadName := anonMP4FileName(filename)
+	uploadName := multipartFileName(filename)
 	chunkSize, chunkParallel := anonMP4ChunkSettings(cfg)
 	totalChunks := int((size + chunkSize - 1) / chunkSize)
 
@@ -846,16 +846,16 @@ func (a *AnonMP4) uploadLegacy(
 
 // anonMP4MultipartBody builds a streaming multipart body with a known length.
 func anonMP4MultipartBody(filename string, reader io.Reader, size int64) (io.Reader, string, int64, error) {
-	boundary, err := anonMP4Boundary()
+	boundary, err := multipartBoundary()
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("generating boundary: %w", err)
 	}
 
-	name := anonMP4FileName(filename)
-	contentType := anonMP4ContentType(name)
+	name := multipartFileName(filename)
+	contentType := videoContentType(name)
 
 	prefix := "--" + boundary + "\r\n" +
-		`Content-Disposition: form-data; name="file"; filename="` + anonMP4EscapeQuotes(name) + `"` + "\r\n" +
+		`Content-Disposition: form-data; name="file"; filename="` + escapeMultipartQuotes(name) + `"` + "\r\n" +
 		"Content-Type: " + contentType + "\r\n\r\n"
 	suffix := "\r\n--" + boundary + "--\r\n"
 
@@ -868,7 +868,7 @@ func anonMP4MultipartBody(filename string, reader io.Reader, size int64) (io.Rea
 	return body, "multipart/form-data; boundary=" + boundary, length, nil
 }
 
-func anonMP4Boundary() (string, error) {
+func multipartBoundary() (string, error) {
 	var raw [18]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", err
@@ -924,7 +924,7 @@ func (e *anonMP4Error) String() string {
 
 // ── File naming and content type ───────────────────────────────────
 
-var anonMP4VideoTypes = map[string]string{
+var videoContentTypes = map[string]string{
 	".3g2":  "video/3gpp2",
 	".3gp":  "video/3gpp",
 	".asf":  "video/x-ms-asf",
@@ -947,9 +947,9 @@ var anonMP4VideoTypes = map[string]string{
 	".wmv":  "video/x-ms-wmv",
 }
 
-func anonMP4ContentType(name string) string {
+func videoContentType(name string) string {
 	ext := strings.ToLower(filepath.Ext(name))
-	if contentType, ok := anonMP4VideoTypes[ext]; ok {
+	if contentType, ok := videoContentTypes[ext]; ok {
 		return contentType
 	}
 	if contentType := mime.TypeByExtension(ext); strings.HasPrefix(strings.ToLower(contentType), "video/") {
@@ -958,7 +958,7 @@ func anonMP4ContentType(name string) string {
 	return "application/octet-stream"
 }
 
-func anonMP4FileName(filename string) string {
+func multipartFileName(filename string) string {
 	name := filepath.Base(filename)
 	name = strings.Map(func(r rune) rune {
 		if r == '\r' || r == '\n' {
@@ -972,6 +972,6 @@ func anonMP4FileName(filename string) string {
 	return name
 }
 
-func anonMP4EscapeQuotes(value string) string {
+func escapeMultipartQuotes(value string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
 }

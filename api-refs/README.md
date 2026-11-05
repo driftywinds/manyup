@@ -11,6 +11,7 @@ client-rendered, sign-in gated, or have gone offline.
 | Service | Plugin | Auth | Upload method | Max size | Reference |
 |---|---|---|---|---|---|
 | 0x0.st | `0x0.go` | none | `multipart/form-data` POST | 512 MiB | [0x0.md](0x0.md) |
+| Abyss.to | `abyss.go` | **required** API key | `multipart/form-data` POST, key in URL path | 10 GB on the checked account | [abyss.md](abyss.md) |
 | AnonMP4 | `anonmp4.go` | none | live node/chunk upload (8 MiB chunks, first-chunk node race); documented multipart fallback | 20 GB documented; the error example reports a 50 GiB cap | [anonmp4.md](anonmp4.md) |
 | BuzzHeavier | `buzzheavier.go` | optional account id | raw `PUT` | no documented limit | [buzzheavier.md](buzzheavier.md) |
 | DataNodes | `datanodes.go` | **required** key | resolve server + multipart POST | 3 GB free / unlimited premium | [datanodes.md](datanodes.md) |
@@ -50,7 +51,7 @@ Plugins read credentials from a `plugin.Credentials` map. The keys actually used
 
 | Key | Services |
 |---|---|
-| `API_TOKEN` | BuzzHeavier, DataNodes, GoFile, interim (optional), Mocha, PixelDrain, VikingFile, ZincDrive |
+| `API_TOKEN` | Abyss.to, BuzzHeavier, DataNodes, GoFile, interim (optional), Mocha, PixelDrain, VikingFile, ZincDrive |
 
 The uploader merges env vars of the form `MANYUP_<SERVICE>_<KEY>` into that map, so
 `MANYUP_MOCHA_API_TOKEN` is the env fallback for `manyup config set mocha API_TOKEN ...`.
@@ -71,6 +72,7 @@ treated as inconclusive so a working token is never discarded because a host is 
 | Service | Check request | Rejected when |
 |---|---|---|
 | Mocha | `GET https://api.mocha.my/api/profile/summary` | `401` |
+| Abyss.to | `GET https://api.abyss.to/v1/about?key=...` | `401`/`403` |
 | GoFile | `GET https://api.gofile.io/accounts/getid` | `401` (`{"status":"error-token"}`) |
 | interim | `GET <instance>/api/v1/keys/me` when a hash is set (then `/status` if unapproved); `/status` alone when anonymous | `401`/`403`, or `"approved": false` while `public_uploads` is false; anonymous rejected when `public_uploads` is false |
 | DataNodes | `GET https://datanodes.to/api/upload/server?key=...` | body has no `sess_id` (HTTP stays `200`) |

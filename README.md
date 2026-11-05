@@ -6,7 +6,8 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 ## Features
 
-- **Multi-service uploads** — AnonMP4, BuzzHeavier, DataNodes, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, VikingFile, ZincDrive, and 0x0.st out of the box
+- **Multi-service uploads** — Abyss.to, AnonMP4, BuzzHeavier, DataNodes, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, VikingFile, ZincDrive, and 0x0.st out of the box
+- **Per-command source selection** — upload to specific services for one run with `-s/--sources` without changing your saved defaults
 - **Self-hosted interim instances** — interim is open source; add any number of instances and upload to them alongside the main one
 - **Parallel or sequential** — upload to all selected services at once, or one at a time
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
@@ -23,6 +24,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 | Service | Auth | Upload Method | Max Size |
 |---|---|---|---|
+| [Abyss.to](https://abyss.to) | **Required** (API_TOKEN) | Streaming multipart POST | 10 GB |
 | [AnonMP4](https://anonmp4.to) | None | Chunked streaming upload | 20 GB |
 | [0x0.st](https://0x0.st) | None | Multipart POST | 512 MB |
 | [BuzzHeavier](https://buzzheavier.com) | Optional (API_TOKEN) | Raw PUT | Unlimited |
@@ -65,6 +67,11 @@ Chunk tuning is available per service:
 manyup config set anonmp4 chunk_size_mb 16
 manyup config set anonmp4 chunk_parallel 8
 ```
+
+Abyss.to is a permanent video host and requires an account API key. Its upload
+endpoint takes the key in the URL path, returns a `slug`, and the public watch
+page is `https://abysscdn.com/?v={slug}`. Conversion is asynchronous, so a
+freshly uploaded video may take time to become playable.
 
 ## Installation
 
@@ -174,6 +181,7 @@ manyup <command> [options]
 | Command | Description |
 |---|---|
 | `manyup upload <file> [file...]` | Upload file(s) to selected services |
+| `manyup upload <file> -s <service>...` | Upload only to these services for this run |
 | `manyup services` | List available service plugins |
 | `manyup config set <service>` | Prompt for the API token (safe for any characters) |
 | `manyup config set <service> <value>` | Set the API token (key defaults to `API_TOKEN`) |
@@ -190,6 +198,28 @@ manyup <command> [options]
 | `manyup version` | Print version |
 | `manyup update` / `manyup -U` | Replace the current binary with the latest release |
 | `manyup help` | Show usage |
+
+### Selecting sources for one upload
+
+By default, `upload` uses the services enabled with `manyup config select`. The
+`-s` / `--sources` flag overrides that selection for one command only; it does
+not change the saved config:
+
+```bash
+# Only Abyss.to and AnonMP4 for this run
+manyup upload movie.mkv -s abyss anonmp4
+
+# Equivalent comma-separated form
+manyup upload movie.mkv --sources=abyss,anonmp4
+
+# Multiple files
+manyup upload *.mkv -s abyss gofile
+```
+
+Source names are the same names shown by `manyup services` (including configured
+`interim@<name>` instances). An unknown name is rejected with the available
+service list. When using the space-separated form, put the source list after the
+files, or use the comma-separated `--sources=` form.
 
 ### Updating
 
@@ -233,7 +263,7 @@ manyup upload myfile.zip
 
 ### Configure credentials
 
-Only needed for services that require authentication (currently DataNodes, Mocha, PixelDrain and ZincDrive) and for services where you want to tie uploads to an account. interim accepts anonymous uploads on public instances but needs an approved hash on restricted instances:
+Only needed for services that require authentication (currently Abyss.to, DataNodes, Mocha, PixelDrain and ZincDrive) and for services where you want to tie uploads to an account. interim accepts anonymous uploads on public instances but needs an approved hash on restricted instances:
 
 ```bash
 # Omit the value to paste the token at a prompt — works with any characters
@@ -241,6 +271,9 @@ manyup config set storageto
 
 # The credential key defaults to API_TOKEN — this is the short form
 manyup config set mocha mocha_xxxxxxxxxxxxxxxxx
+
+# Abyss.to (required — account API key)
+manyup config set abyss your_abyss_api_key
 
 # DataNodes (required)
 manyup config set datanodes your_api_key_here
@@ -380,7 +413,7 @@ $ manyup config set mocha mocha_correct
 ✓ Set mocha/API_TOKEN (verified)
 ```
 
-Services with a known check: Mocha, GoFile, DataNodes, interim, ZincDrive, BuzzHeavier, PixelDrain.
+Services with a known check: Abyss.to, Mocha, GoFile, DataNodes, interim, ZincDrive, BuzzHeavier, PixelDrain.
 For interim a hash is checked with `GET /keys/me`; an unapproved hash (and an
 anonymous configuration) is rejected when `public_uploads` is false and accepted
 when it is true. `accepting_uploads: false` is reported as "could not verify"
@@ -416,7 +449,7 @@ lists the subcommands:
 
 ```
 $ manyup config set <TAB>
-0x0  anonmp4  buzzheavier  datanodes  gofile  interim  mocha  pixeldrain  vikingfile  zincdrive
+0x0  abyss  anonmp4  buzzheavier  datanodes  gofile  interim  mocha  pixeldrain  vikingfile  zincdrive
 ```
 
 #### cmd.exe
@@ -486,6 +519,7 @@ Config is stored in a JSON file at:
 Credentials can also be set via environment variables instead of the config file:
 
 ```bash
+export MANYUP_ABYSS_API_TOKEN=your_abyss_api_key
 export MANYUP_DATANODES_API_TOKEN=your_key
 export MANYUP_INTERIM_API_TOKEN=interim_xxxxxxxxxxxxxxxxx
 export MANYUP_MOCHA_API_TOKEN=mocha_xxxxxxxxxxxxxxxxx
@@ -545,6 +579,7 @@ manyup/
 │   └── services/
 │       ├── registry.go              # Central service registration (adds interim@<name> instances)
 │       ├── verify.go                # Shared credential-check helpers
+│       ├── abyss.go                 # Abyss.to plugin (streaming multipart video upload)
 │       ├── anonmp4.go               # AnonMP4 plugin (node/chunk video upload)
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
 │       ├── datanodes.go             # DataNodes plugin (two-step multipart API)

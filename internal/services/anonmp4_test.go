@@ -376,7 +376,7 @@ func TestAnonMP4ChunkSettings(t *testing.T) {
 	}
 
 	chunkSize, parallel = anonMP4ChunkSettings(plugin.Config{
-		"chunk_size_mb": "16",
+		"chunk_size_mb":  "16",
 		"chunk_parallel": "8",
 	})
 	if want := int64(16 << 20); chunkSize != want {
@@ -387,7 +387,7 @@ func TestAnonMP4ChunkSettings(t *testing.T) {
 	}
 
 	chunkSize, parallel = anonMP4ChunkSettings(plugin.Config{
-		"chunk_size_mb": "0",
+		"chunk_size_mb":  "0",
 		"chunk_parallel": "999",
 	})
 	if chunkSize != anonMP4ChunkSize || parallel != anonMP4ChunkParallel {
@@ -397,17 +397,17 @@ func TestAnonMP4ChunkSettings(t *testing.T) {
 
 func TestAnonMP4ContentType(t *testing.T) {
 	cases := map[string]string{
-		"movie.mp4":         "video/mp4",
-		"movie.MKV":         "video/x-matroska",
-		"movie.webm":        "video/webm",
-		"movie.avi":         "video/x-msvideo",
-		"movie.mov":         "video/quicktime",
-		"movie.unknown":     "application/octet-stream",
-		"movie.audio-file":  "application/octet-stream",
+		"movie.mp4":        "video/mp4",
+		"movie.MKV":        "video/x-matroska",
+		"movie.webm":       "video/webm",
+		"movie.avi":        "video/x-msvideo",
+		"movie.mov":        "video/quicktime",
+		"movie.unknown":    "application/octet-stream",
+		"movie.audio-file": "application/octet-stream",
 	}
 	for name, want := range cases {
-		if got := anonMP4ContentType(name); got != want {
-			t.Errorf("anonMP4ContentType(%q) = %q, want %q", name, got, want)
+		if got := videoContentType(name); got != want {
+			t.Errorf("videoContentType(%q) = %q, want %q", name, got, want)
 		}
 	}
 }
@@ -421,8 +421,8 @@ func TestAnonMP4FileName(t *testing.T) {
 		"bad\r\nname.mp4":           "bad__name.mp4",
 	}
 	for input, want := range cases {
-		if got := anonMP4FileName(input); got != want {
-			t.Errorf("anonMP4FileName(%q) = %q, want %q", input, got, want)
+		if got := multipartFileName(input); got != want {
+			t.Errorf("multipartFileName(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

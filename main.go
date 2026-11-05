@@ -83,6 +83,7 @@ USAGE:
 
 COMMANDS:
   upload <file> [file...]     Upload file(s) to selected services
+  upload <file> -s <service>...  Upload only to these services for this run
   services                    List available service plugins
   config menu                 Interactive service selector
   config set <service>                 Prompt for the API token (quote-free, any characters)
@@ -125,15 +126,135 @@ EXAMPLES:
   # Upload multiple files
   manyup upload *.zip
 
+  # Upload only to specific services, without changing the saved selection
+  manyup upload movie.mkv -s abyss anonmp4
+  manyup upload movie.mkv --sources=abyss,anonmp4
+
 ENVIRONMENT VARIABLES:
   Credentials can also be set via env vars:
     MANYUP_<SERVICE>_API_TOKEN  e.g. MANYUP_GOFILE_API_TOKEN=xxx
 `)
 }
 
+type uploadOptions struct {
+	files      []string
+	sources    []string
+	hasSources bool
+}
+
+// parseUploadArgs parses file paths plus an optional -s/--sources override.
+//
+// The override accepts both forms:
+//
+//	manyup upload file.mkv -s abyss anonmp4
+//	manyup upload file.mkv --sources=abyss,anonmp4
+//
+// Source names are validated against the registry. In space-separated mode a
+// token that is not a service name ends the source list; it is accepted as a
+// file only when it exists, so a misspelled source is reported as such instead
+// of becoming a nonexistent upload target.
+func parseUploadArgs(args []string, registry *plugin.Registry) (uploadOptions, error) {
+	var opts uploadOptions
+
+	known := make(map[string]string, len(registry.Names()))
+	for _, name := range registry.Names() {
+		known[strings.ToLower(name)] = name
+	}
+
+	addSource := func(raw string) error {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return fmt.Errorf("empty service name in --sources")
+		}
+		canonical, ok := known[strings.ToLower(name)]
+		if !ok {
+			return fmt.Errorf("unknown source %q (available: %s)", name, strings.Join(registry.Names(), ", "))
+		}
+		for _, existing := range opts.sources {
+			if existing == canonical {
+				return nil
+			}
+		}
+		opts.sources = append(opts.sources, canonical)
+		return nil
+	}
+
+	addSourceList := func(raw string) error {
+		for _, part := range strings.Split(raw, ",") {
+			if err := addSource(part); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	inSources := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		switch {
+		case arg == "--":
+			opts.files = append(opts.files, args[i+1:]...)
+			i = len(args)
+
+		case arg == "-s" || arg == "--sources":
+			opts.hasSources = true
+			inSources = true
+
+		case strings.HasPrefix(arg, "--sources="):
+			opts.hasSources = true
+			inSources = false
+			if err := addSourceList(strings.TrimPrefix(arg, "--sources=")); err != nil {
+				return opts, err
+			}
+
+		case strings.HasPrefix(arg, "-s="):
+			opts.hasSources = true
+			inSources = false
+			if err := addSourceList(strings.TrimPrefix(arg, "-s=")); err != nil {
+				return opts, err
+			}
+
+		case strings.HasPrefix(arg, "-"):
+			return opts, fmt.Errorf("unknown flag %q", arg)
+
+		default:
+			if !inSources {
+				opts.files = append(opts.files, arg)
+				continue
+			}
+
+			if canonical, ok := known[strings.ToLower(arg)]; ok {
+				if err := addSource(canonical); err != nil {
+					return opts, err
+				}
+				continue
+			}
+
+			// A non-service token ends the source list. It is treated as a file
+			// only if it exists; otherwise it is almost certainly a typo in a
+			// source name.
+			if _, err := os.Stat(arg); err == nil {
+				inSources = false
+				opts.files = append(opts.files, arg)
+				continue
+			}
+			return opts, fmt.Errorf("unknown source %q (available: %s)", arg, strings.Join(registry.Names(), ", "))
+		}
+	}
+
+	if len(opts.files) == 0 {
+		return opts, fmt.Errorf("no files specified")
+	}
+	if opts.hasSources && len(opts.sources) == 0 {
+		return opts, fmt.Errorf("-s/--sources requires at least one service")
+	}
+	return opts, nil
+}
+
 func cmdUpload() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: manyup upload <file> [file...]")
+		fmt.Fprintln(os.Stderr, "Usage: manyup upload <file> [file...] [-s|--sources <service>...]")
 		os.Exit(1)
 	}
 
@@ -143,13 +264,23 @@ func cmdUpload() {
 		os.Exit(1)
 	}
 
-	if len(cfg.SelectedServices) == 0 {
+	registry := services.AllWithConfig(cfg)
+	opts, err := parseUploadArgs(os.Args[2:], registry)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Usage: manyup upload <file> [file...] [-s|--sources <service>...]")
+		os.Exit(1)
+	}
+
+	if !opts.hasSources && len(cfg.SelectedServices) == 0 {
 		fmt.Fprintln(os.Stderr, "No services selected. Use 'manyup config select <service>' first.")
 		os.Exit(1)
 	}
 
-	registry := services.AllWithConfig(cfg)
 	mgr := uploader.New(registry, cfg)
+	if opts.hasSources {
+		mgr.SetSelectedServices(opts.sources)
+	}
 
 	// Set up context with signal handling for graceful abort.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -163,7 +294,7 @@ func cmdUpload() {
 		cancel()
 	}()
 
-	files := os.Args[2:]
+	files := opts.files
 	progressCh := make(chan uploader.Progress, 100)
 	display := newProgressDisplay()
 
@@ -1239,6 +1370,8 @@ func completionCandidatesFor(words []string, registry *plugin.Registry) []string
 	}
 
 	switch words[0] {
+	case "upload":
+		return uploadSourceCandidates(words[1:], registry)
 	case "config":
 		switch len(words) {
 		case 1:
@@ -1267,6 +1400,47 @@ func completionCandidatesFor(words []string, registry *plugin.Registry) []string
 		}
 	}
 	return nil
+}
+
+// uploadSourceCandidates completes service names after -s/--sources. It stops
+// once a token is no longer a service name, so a file after the source list is
+// not misread as another source.
+func uploadSourceCandidates(args []string, registry *plugin.Registry) []string {
+	sourceIndex := -1
+	for i, arg := range args {
+		switch {
+		case arg == "-s" || arg == "--sources":
+			sourceIndex = i
+		case strings.HasPrefix(arg, "-s=") || strings.HasPrefix(arg, "--sources="):
+			// The whole list was supplied inline; nothing more to complete.
+			return nil
+		}
+	}
+	if sourceIndex < 0 {
+		return nil
+	}
+
+	known := make(map[string]string, len(registry.Names()))
+	for _, name := range registry.Names() {
+		known[strings.ToLower(name)] = name
+	}
+
+	used := make(map[string]bool)
+	for _, arg := range args[sourceIndex+1:] {
+		canonical, ok := known[strings.ToLower(arg)]
+		if !ok {
+			return nil
+		}
+		used[canonical] = true
+	}
+
+	out := make([]string, 0, len(known))
+	for _, name := range registry.Names() {
+		if !used[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // interimInstanceLabels lists configured instances without the interim@ prefix,
