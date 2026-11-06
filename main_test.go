@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/driftywinds/manyup/internal/config"
+	"github.com/driftywinds/manyup/internal/plugin"
 	"github.com/driftywinds/manyup/internal/services"
+	"github.com/driftywinds/manyup/internal/uploader"
 )
 
 func TestOnPath(t *testing.T) {
@@ -124,6 +126,7 @@ func TestParseUploadArgs(t *testing.T) {
 		args        []string
 		wantFiles   []string
 		wantSources []string
+		wantBulk    bool
 		wantErr     bool
 	}{
 		{
@@ -161,6 +164,30 @@ func TestParseUploadArgs(t *testing.T) {
 			wantFiles:   []string{first, second},
 			wantSources: nil,
 		},
+		{
+			name:      "bulk files",
+			args:      []string{"-b", first, second},
+			wantFiles: []string{first, second},
+			wantBulk:  true,
+		},
+		{
+			name:        "bulk with source",
+			args:        []string{"-s", "anonmp4", "-b", first, second},
+			wantFiles:   []string{first, second},
+			wantSources: []string{"anonmp4"},
+			wantBulk:    true,
+		},
+		{
+			name:        "bulk with inline source",
+			args:        []string{"--sources=abyss", "--bulk", first},
+			wantFiles:   []string{first},
+			wantSources: []string{"abyss"},
+			wantBulk:    true,
+		},
+		{name: "bulk without files", args: []string{"-b"}, wantErr: true},
+		{name: "files before bulk", args: []string{first, "-b", second}, wantErr: true},
+		{name: "flag after bulk", args: []string{"-b", first, "-s", "anonmp4"}, wantErr: true},
+		{name: "duplicate bulk", args: []string{"-b", first, "--bulk", second}, wantErr: true},
 		{name: "no files", args: []string{"-s", "anonmp4"}, wantErr: true},
 		{name: "no sources after flag", args: []string{first, "-s"}, wantErr: true},
 		{name: "unknown source", args: []string{first, "-s", "nope"}, wantErr: true},
@@ -189,7 +216,60 @@ func TestParseUploadArgs(t *testing.T) {
 			if c.wantSources != nil && !got.hasSources {
 				t.Error("hasSources = false, want true")
 			}
+			if got.bulk != c.wantBulk {
+				t.Errorf("bulk = %v, want %v", got.bulk, c.wantBulk)
+			}
 		})
+	}
+}
+
+func TestUniqueNonEmpty(t *testing.T) {
+	got := uniqueNonEmpty([]string{"anonmp4", "", "abyss", "anonmp4", " abyss "})
+	want := []string{"anonmp4", "abyss"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("uniqueNonEmpty = %v, want %v", got, want)
+	}
+}
+
+func TestSingleBulkSource(t *testing.T) {
+	registry := services.All()
+
+	got, err := singleBulkSource([]string{"abyss", "abyss"}, registry)
+	if err != nil || got != "abyss" {
+		t.Fatalf("single source = %q, %v; want abyss", got, err)
+	}
+	for _, sources := range [][]string{
+		nil,
+		{"abyss", "anonmp4"},
+		{"not-a-service"},
+	} {
+		if _, err := singleBulkSource(sources, registry); err == nil {
+			t.Errorf("singleBulkSource(%v) returned no error", sources)
+		}
+	}
+}
+
+func TestBulkResultURL(t *testing.T) {
+	result := &uploader.MultiResult{Results: []*plugin.UploadResult{
+		{Service: "abyss", URL: "https://abysscdn.com/?v=abc"},
+	}}
+	got, err := bulkResultURL(result)
+	if err != nil {
+		t.Fatalf("bulkResultURL: %v", err)
+	}
+	if got != "https://abysscdn.com/?v=abc" {
+		t.Errorf("url = %q", got)
+	}
+
+	failed := &uploader.MultiResult{Results: []*plugin.UploadResult{
+		{Service: "abyss", Error: os.ErrPermission},
+	}}
+	if _, err := bulkResultURL(failed); err == nil {
+		t.Error("expected an error for a failed result")
+	}
+
+	if _, err := bulkResultURL(&uploader.MultiResult{}); err == nil {
+		t.Error("expected an error for an empty result")
 	}
 }
 

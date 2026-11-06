@@ -8,6 +8,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 - **Multi-service uploads** — Abyss.to, AnonMP4, BuzzHeavier, DataNodes, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, VikingFile, ZincDrive, and 0x0.st out of the box
 - **Per-command source selection** — upload to specific services for one run with `-s/--sources` without changing your saved defaults
+- **Bulk mode** — upload a list of files one by one to a single source and collect every URL at the end
 - **Self-hosted interim instances** — interim is open source; add any number of instances and upload to them alongside the main one
 - **Parallel or sequential** — upload to all selected services at once, or one at a time
 - **Real-time progress bars** — live speed, percentage, and ETA per service using ANSI terminal rendering
@@ -205,6 +206,7 @@ manyup <command> [options]
 |---|---|
 | `manyup upload <file> [file...]` | Upload file(s) to selected services |
 | `manyup upload <file> -s <service>...` | Upload only to these services for this run |
+| `manyup upload -s <service> -b <file> [file...]` | Bulk upload files one by one to one source |
 | `manyup services` | List available service plugins |
 | `manyup config set <service>` | Prompt for the API token (safe for any characters) |
 | `manyup config set <service> <value>` | Set the API token (key defaults to `API_TOKEN`) |
@@ -243,6 +245,29 @@ Source names are the same names shown by `manyup services` (including configured
 `interim@<name>` instances). An unknown name is rejected with the available
 service list. When using the space-separated form, put the source list after the
 files, or use the comma-separated `--sources=` form.
+
+### Bulk upload to one source
+
+`-b` / `--bulk` uploads a list of files sequentially to exactly one source. It
+must be the last flag; every argument after it is treated as a separate file:
+
+```bash
+# One source explicitly, then the file list
+manyup upload -s abyss -b episode1.mkv episode2.mkv episode3.mkv
+
+# Or use the single source already selected in config
+manyup upload -b episode1.mkv episode2.mkv
+```
+
+Bulk mode requires **exactly one** effective source: either one service selected
+in config, or one service passed with `-s`. If config has multiple sources
+selected, pass `-s <service>` to narrow this run down to one. Bulk refuses to run
+rather than uploading the same list to several hosts.
+
+After each successful file, manyup prints its URL. When the list finishes it
+prints a final `ALL LINKS` block containing only the URLs, one per line, so the
+whole block can be copied at once. Failed files are skipped and reported; the
+command exits non-zero if any file failed.
 
 ### Updating
 

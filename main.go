@@ -84,6 +84,7 @@ USAGE:
 COMMANDS:
   upload <file> [file...]     Upload file(s) to selected services
   upload <file> -s <service>...  Upload only to these services for this run
+  upload [-s <service>] -b <file> [file...]  Bulk one-by-one to one service
   services                    List available service plugins
   config menu                 Interactive service selector
   config set <service>                 Prompt for the API token (quote-free, any characters)
@@ -130,6 +131,10 @@ EXAMPLES:
   manyup upload movie.mkv -s abyss anonmp4
   manyup upload movie.mkv --sources=abyss,anonmp4
 
+  # Bulk-upload several files to one source, one file at a time.
+  # -b/--bulk must be the last flag; everything after it is a file.
+  manyup upload -s abyss -b episode1.mkv episode2.mkv episode3.mkv
+
 ENVIRONMENT VARIABLES:
   Credentials can also be set via env vars:
     MANYUP_<SERVICE>_API_TOKEN  e.g. MANYUP_GOFILE_API_TOKEN=xxx
@@ -140,6 +145,7 @@ type uploadOptions struct {
 	files      []string
 	sources    []string
 	hasSources bool
+	bulk       bool
 }
 
 // parseUploadArgs parses file paths plus an optional -s/--sources override.
@@ -153,6 +159,10 @@ type uploadOptions struct {
 // token that is not a service name ends the source list; it is accepted as a
 // file only when it exists, so a misspelled source is reported as such instead
 // of becoming a nonexistent upload target.
+//
+// In bulk mode (-b/--bulk) the flag must be last and every following argument
+// is a separate file. Flags and files before it are rejected so the file list
+// is unambiguous.
 func parseUploadArgs(args []string, registry *plugin.Registry) (uploadOptions, error) {
 	var opts uploadOptions
 
@@ -215,6 +225,25 @@ func parseUploadArgs(args []string, registry *plugin.Registry) (uploadOptions, e
 				return opts, err
 			}
 
+		case arg == "-b" || arg == "--bulk":
+			if opts.bulk {
+				return opts, fmt.Errorf("-b/--bulk may only be specified once")
+			}
+			if len(opts.files) > 0 {
+				return opts, fmt.Errorf("-b/--bulk must be the last flag; put all files after it")
+			}
+			if i+1 >= len(args) {
+				return opts, fmt.Errorf("-b/--bulk requires at least one file after it")
+			}
+			for _, file := range args[i+1:] {
+				if strings.HasPrefix(file, "-") {
+					return opts, fmt.Errorf("flags are not allowed after -b/--bulk (%q)", file)
+				}
+			}
+			opts.bulk = true
+			opts.files = append(opts.files, args[i+1:]...)
+			i = len(args)
+
 		case strings.HasPrefix(arg, "-"):
 			return opts, fmt.Errorf("unknown flag %q", arg)
 
@@ -252,9 +281,43 @@ func parseUploadArgs(args []string, registry *plugin.Registry) (uploadOptions, e
 	return opts, nil
 }
 
+// uniqueNonEmpty removes blank and duplicate service names while preserving
+// the order the user configured or passed on the command line.
+func uniqueNonEmpty(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+// singleBulkSource enforces the one-source rule for bulk mode.
+func singleBulkSource(sources []string, registry *plugin.Registry) (string, error) {
+	sources = uniqueNonEmpty(sources)
+	switch len(sources) {
+	case 0:
+		return "", fmt.Errorf("bulk upload requires a source; select one with 'manyup config select <service>' or -s <service>")
+	case 1:
+		if _, ok := registry.Get(sources[0]); !ok {
+			return "", fmt.Errorf("bulk upload source %q is not registered", sources[0])
+		}
+		return sources[0], nil
+	default:
+		return "", fmt.Errorf("bulk upload requires exactly one source, but %d are selected: %s (use -s <service> to choose one)",
+			len(sources), strings.Join(sources, ", "))
+	}
+}
+
 func cmdUpload() {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "Usage: manyup upload <file> [file...] [-s|--sources <service>...]")
+		fmt.Fprintln(os.Stderr, "       manyup upload [-s|--sources <service>] -b|--bulk <file> [file...]")
 		os.Exit(1)
 	}
 
@@ -269,10 +332,22 @@ func cmdUpload() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		fmt.Fprintln(os.Stderr, "Usage: manyup upload <file> [file...] [-s|--sources <service>...]")
+		fmt.Fprintln(os.Stderr, "       manyup upload [-s|--sources <service>] -b|--bulk <file> [file...]")
 		os.Exit(1)
 	}
 
-	if !opts.hasSources && len(cfg.SelectedServices) == 0 {
+	effectiveSources := cfg.SelectedServices
+	if opts.hasSources {
+		effectiveSources = opts.sources
+	}
+	effectiveSources = uniqueNonEmpty(effectiveSources)
+
+	if opts.bulk {
+		if _, err := singleBulkSource(effectiveSources, registry); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	} else if len(effectiveSources) == 0 {
 		fmt.Fprintln(os.Stderr, "No services selected. Use 'manyup config select <service>' first.")
 		os.Exit(1)
 	}
@@ -280,6 +355,10 @@ func cmdUpload() {
 	mgr := uploader.New(registry, cfg)
 	if opts.hasSources {
 		mgr.SetSelectedServices(opts.sources)
+	} else if opts.bulk {
+		// Use the single validated source even if the config list contains
+		// whitespace or duplicates.
+		mgr.SetSelectedServices(effectiveSources)
 	}
 
 	// Set up context with signal handling for graceful abort.
@@ -307,18 +386,90 @@ func cmdUpload() {
 		}
 	}()
 
-	for _, filePath := range files {
-		fmt.Printf("⬆  Uploading: %s\n", filePath)
-		result, err := mgr.UploadFile(ctx, filePath, progressCh)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			continue
+	var bulkLinks []string
+	bulkFailures := 0
+	if opts.bulk {
+		for _, filePath := range files {
+			if ctx.Err() != nil {
+				break
+			}
+			fmt.Printf("⬆  Uploading: %s\n", filePath)
+			result, err := mgr.UploadFile(ctx, filePath, progressCh)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				bulkFailures++
+				continue
+			}
+			url, err := bulkResultURL(result)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %s: %v\n", filePath, err)
+				bulkFailures++
+				continue
+			}
+			fmt.Printf("\n✓ %s\n", url)
+			bulkLinks = append(bulkLinks, url)
 		}
-		printResult(result)
+	} else {
+		for _, filePath := range files {
+			fmt.Printf("⬆  Uploading: %s\n", filePath)
+			result, err := mgr.UploadFile(ctx, filePath, progressCh)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				continue
+			}
+			printResult(result)
+		}
 	}
 
 	close(progressCh)
 	<-done
+
+	if opts.bulk {
+		printBulkLinks(bulkLinks, len(files), bulkFailures)
+		if bulkFailures > 0 || ctx.Err() != nil {
+			os.Exit(1)
+		}
+	}
+}
+
+// bulkResultURL returns the one upload URL from a single-source result.
+func bulkResultURL(result *uploader.MultiResult) (string, error) {
+	if result == nil {
+		return "", fmt.Errorf("upload returned no result")
+	}
+	var firstErr error
+	for _, r := range result.Results {
+		if r.Error != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", r.Service, r.Error)
+			}
+			continue
+		}
+		if r.URL != "" {
+			return r.URL, nil
+		}
+	}
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return "", fmt.Errorf("no upload URL returned")
+}
+
+// printBulkLinks prints the final copy-friendly block. It contains only URLs,
+// one per line, so selecting the block copies a usable list.
+func printBulkLinks(links []string, total, failures int) {
+	if len(links) == 0 {
+		fmt.Fprintln(os.Stderr, "No files were uploaded.")
+		return
+	}
+
+	fmt.Printf("\n===== ALL LINKS (%d/%d) =====\n", len(links), total)
+	for _, link := range links {
+		fmt.Println(link)
+	}
+	if failures > 0 {
+		fmt.Fprintf(os.Stderr, "%d file(s) failed.\n", failures)
+	}
 }
 
 func cmdServices() {
