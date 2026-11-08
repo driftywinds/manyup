@@ -6,7 +6,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 ## Features
 
-- **Multi-service uploads** — Abyss.to, AnonMP4, BuzzHeavier, DataNodes, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, Streamtape, VikingFile, ZincDrive, and 0x0.st out of the box
+- **Multi-service uploads** — Abyss.to, AnonMP4, BuzzHeavier, DataNodes, Earnvids, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, Streamtape, VikingFile, ZincDrive, and 0x0.st out of the box
 - **Per-command source selection** — upload to specific services for one run with `-s/--sources` without changing your saved defaults
 - **Bulk mode** — upload a list of files one by one to a single source and collect every URL at the end
 - **Self-hosted interim instances** — interim is open source; add any number of instances and upload to them alongside the main one
@@ -30,6 +30,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 | [0x0.st](https://0x0.st) | None | Multipart POST | 512 MB |
 | [BuzzHeavier](https://buzzheavier.com) | Optional (API_TOKEN) | Raw PUT | Unlimited |
 | [DataNodes](https://datanodes.to) | **Required** (API_TOKEN) | Two-step multipart POST | 3 GB free / unlimited premium |
+| [Earnvids](https://earnvids.com) | **Required** (API_TOKEN) | Upload-server discovery → multipart POST | Account storage limit |
 | [FuckingFast](https://fuckingfast.net) | Optional (API_TOKEN) | Raw PUT | Unlimited |
 | [GoFile](https://gofile.io) | Optional (API_TOKEN) | Multipart POST | Unlimited |
 | [interim](https://interim.drifty.win) | Optional (user hash; required when the instance restricts uploads) | Single PUT / S3 multipart | Per instance (7 GB on the main instance) |
@@ -80,6 +81,12 @@ API key, both found under **Account Settings** in the Streamtape user panel.
 manyup first asks Streamtape for a short-lived upload URL, then streams the file
 as multipart field `file1`; the returned `streamtape.com/v/...` URL is the public
 link. Conversion is asynchronous.
+
+Earnvids uses an API key and a two-step upload: it discovers an account-specific
+upload server, streams the file there with `key`/`file` fields, then resolves the
+public link through the account’s file list. Public domains vary, so manyup uses
+the link the service returns rather than hardcoding one. Conversion is also
+asynchronous.
 
 ## Installation
 
@@ -318,7 +325,7 @@ manyup upload myfile.zip
 
 ### Configure credentials
 
-Only needed for services that require authentication (currently Abyss.to, DataNodes, Mocha, PixelDrain, Streamtape and ZincDrive) and for services where you want to tie uploads to an account. interim accepts anonymous uploads on public instances but needs an approved hash on restricted instances:
+Only needed for services that require authentication (currently Abyss.to, DataNodes, Earnvids, Mocha, PixelDrain, Streamtape and ZincDrive) and for services where you want to tie uploads to an account. interim accepts anonymous uploads on public instances but needs an approved hash on restricted instances:
 
 ```bash
 # Omit the value to paste the token at a prompt — works with any characters
@@ -332,6 +339,9 @@ manyup config set abyss your_abyss_api_key
 
 # DataNodes (required)
 manyup config set datanodes your_api_key_here
+
+# Earnvids (required — API key)
+manyup config set earnvids your_earnvids_api_key
 
 # interim (optional — needed when the instance restricts uploads; hash must be approved)
 manyup config set interim interim_xxxxxxxxxxxxxxxxx
@@ -472,7 +482,7 @@ $ manyup config set mocha mocha_correct
 ✓ Set mocha/API_TOKEN (verified)
 ```
 
-Services with a known check: Abyss.to, Streamtape, Mocha, GoFile, DataNodes, interim, ZincDrive, BuzzHeavier, PixelDrain.
+Services with a known check: Abyss.to, Streamtape, Earnvids, Mocha, GoFile, DataNodes, interim, ZincDrive, BuzzHeavier, PixelDrain.
 For interim a hash is checked with `GET /keys/me`; an unapproved hash (and an
 anonymous configuration) is rejected when `public_uploads` is false and accepted
 when it is true. `accepting_uploads: false` is reported as "could not verify"
@@ -508,7 +518,7 @@ lists the subcommands:
 
 ```
 $ manyup config set <TAB>
-0x0  abyss  anonmp4  buzzheavier  datanodes  gofile  interim  mocha  pixeldrain  streamtape  vikingfile  zincdrive
+0x0  abyss  anonmp4  buzzheavier  datanodes  earnvids  gofile  interim  mocha  pixeldrain  streamtape  vikingfile  zincdrive
 ```
 
 #### cmd.exe
@@ -580,6 +590,7 @@ Credentials can also be set via environment variables instead of the config file
 ```bash
 export MANYUP_ABYSS_API_TOKEN=your_abyss_api_key
 export MANYUP_DATANODES_API_TOKEN=your_key
+export MANYUP_EARNVIDS_API_TOKEN=your_earnvids_api_key
 export MANYUP_INTERIM_API_TOKEN=interim_xxxxxxxxxxxxxxxxx
 export MANYUP_MOCHA_API_TOKEN=mocha_xxxxxxxxxxxxxxxxx
 export MANYUP_STREAMTAPE_USERNAME=your_api_login
@@ -644,6 +655,7 @@ manyup/
 │       ├── anonmp4.go               # AnonMP4 plugin (node/chunk video upload)
 │       ├── buzzheavier.go           # BuzzHeavier plugin (PUT upload)
 │       ├── datanodes.go             # DataNodes plugin (two-step multipart API)
+│       ├── earnvids.go              # Earnvids plugin (upload server + multipart POST)
 │       ├── fuckingfast.go           # FuckingFast plugin (PUT upload)
 │       ├── gofile.go                # GoFile plugin (multipart upload)
 │       ├── interim.go               # interim plugin (per-instance, single PUT or S3 multipart)

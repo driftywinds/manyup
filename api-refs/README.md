@@ -15,6 +15,7 @@ client-rendered, sign-in gated, or have gone offline.
 | AnonMP4 | `anonmp4.go` | none | live node/chunk upload (8 MiB chunks, first-chunk node race); documented multipart fallback | 20 GB documented; the error example reports a 50 GiB cap | [anonmp4.md](anonmp4.md) |
 | BuzzHeavier | `buzzheavier.go` | optional account id | raw `PUT` | no documented limit | [buzzheavier.md](buzzheavier.md) |
 | DataNodes | `datanodes.go` | **required** key | resolve server + multipart POST | 3 GB free / unlimited premium | [datanodes.md](datanodes.md) |
+| Earnvids | `earnvids.go` | **required** key | upload-server discovery + multipart POST; public link via file list | account storage; no documented per-file cap | [earnvids.md](earnvids.md) |
 | FuckingFast | `fuckingfast.go` | optional account id | raw `PUT` | no documented limit | [fuckingfast.md](fuckingfast.md) |
 | GoFile | `gofile.go` | optional token | `multipart/form-data` POST | no per-file cap; free tier allows 10,000 stored files | [gofile.md](gofile.md) |
 | interim | `interim.go` | optional user hash (required and approved when the instance restricts uploads); self-hosted instances supported | single presigned `PUT` or S3 multipart | per instance (7 GB on the main instance) | [interim.md](interim.md) |
@@ -52,7 +53,7 @@ Plugins read credentials from a `plugin.Credentials` map. The keys actually used
 
 | Key | Services |
 |---|---|
-| `API_TOKEN` | Abyss.to, BuzzHeavier, DataNodes, GoFile, interim (optional), Mocha, PixelDrain, Streamtape, VikingFile, ZincDrive |
+| `API_TOKEN` | Abyss.to, BuzzHeavier, DataNodes, Earnvids, GoFile, interim (optional), Mocha, PixelDrain, Streamtape, VikingFile, ZincDrive |
 | `USERNAME` | Streamtape (API login) |
 
 The uploader merges env vars of the form `MANYUP_<SERVICE>_<KEY>` into that map, so
@@ -76,6 +77,7 @@ treated as inconclusive so a working token is never discarded because a host is 
 | Mocha | `GET https://api.mocha.my/api/profile/summary` | `401` |
 | Abyss.to | `GET https://api.abyss.to/v1/about?key=...` | `401`/`403` |
 | Streamtape | `GET https://api.streamtape.com/account/info?login=...&key=...` | `401`/`403` or API `400`/`403` |
+| Earnvids | `GET https://earnvidsapi.com/api/account/info?key=...` | `401`/`403` or API `400`/`403` |
 | GoFile | `GET https://api.gofile.io/accounts/getid` | `401` (`{"status":"error-token"}`) |
 | interim | `GET <instance>/api/v1/keys/me` when a hash is set (then `/status` if unapproved); `/status` alone when anonymous | `401`/`403`, or `"approved": false` while `public_uploads` is false; anonymous rejected when `public_uploads` is false |
 | DataNodes | `GET https://datanodes.to/api/upload/server?key=...` | body has no `sess_id` (HTTP stays `200`) |

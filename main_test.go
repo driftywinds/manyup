@@ -461,7 +461,7 @@ func TestCompletionCandidates(t *testing.T) {
 
 	t.Run("config set offers every service", func(t *testing.T) {
 		got := completionCandidates([]string{"config", "set"})
-		for _, want := range []string{"mocha", "gofile", "pixeldrain", "vikingfile", "zincdrive", "buzzheavier", "datanodes", "anonmp4", "abyss", "streamtape", "0x0"} {
+		for _, want := range []string{"mocha", "gofile", "pixeldrain", "vikingfile", "zincdrive", "buzzheavier", "datanodes", "anonmp4", "abyss", "earnvids", "streamtape", "0x0"} {
 			if !contains(got, want) {
 				t.Errorf("candidates %v missing %q", got, want)
 			}
