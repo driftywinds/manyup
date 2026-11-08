@@ -36,6 +36,7 @@ func buildRegistry(cfg *config.AppConfig) *plugin.Registry {
 	RegisterBuzzHeavier(r)
 	RegisterDataNodes(r)
 	RegisterEarnvids(r)
+	RegisterFileMoon(r)
 	RegisterFuckingFast(r)
 	RegisterGoFile(r)
 	RegisterInterimConfigured(r, cfg)
