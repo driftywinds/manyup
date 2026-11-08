@@ -21,6 +21,7 @@ client-rendered, sign-in gated, or have gone offline.
 | Mocha | `mocha.go` | **required** key | multipart presigned `PUT` | 20 GiB (per account) | [mocha.md](mocha.md) |
 | PixelDrain | `pixeldrain.go` | **required** key | raw `PUT` | plan-dependent | [pixeldrain.md](pixeldrain.md) |
 | storage.to | `storageto.go` | optional token | init → presigned `PUT` → confirm | 25 GB anonymous/free; 100 GB paid | [storageto.md](storageto.md) |
+| Streamtape | `streamtape.go` | **required** API login + key | `GET /file/ul` → multipart POST (field `file1`) | account storage; no documented per-file cap | [streamtape.md](streamtape.md) |
 | VikingFile | `vikingfile.go` | optional hash | chunked presigned `PUT` | unlimited | [vikingfile.md](vikingfile.md) |
 | ZincDrive | `zincdrive.go` | **required** key | S3 presigned `PUT` + confirm | 4 GB single-part; 10 GB multipart | [zincdrive.md](zincdrive.md) |
 
@@ -51,7 +52,8 @@ Plugins read credentials from a `plugin.Credentials` map. The keys actually used
 
 | Key | Services |
 |---|---|
-| `API_TOKEN` | Abyss.to, BuzzHeavier, DataNodes, GoFile, interim (optional), Mocha, PixelDrain, VikingFile, ZincDrive |
+| `API_TOKEN` | Abyss.to, BuzzHeavier, DataNodes, GoFile, interim (optional), Mocha, PixelDrain, Streamtape, VikingFile, ZincDrive |
+| `USERNAME` | Streamtape (API login) |
 
 The uploader merges env vars of the form `MANYUP_<SERVICE>_<KEY>` into that map, so
 `MANYUP_MOCHA_API_TOKEN` is the env fallback for `manyup config set mocha API_TOKEN ...`.
@@ -73,6 +75,7 @@ treated as inconclusive so a working token is never discarded because a host is 
 |---|---|---|
 | Mocha | `GET https://api.mocha.my/api/profile/summary` | `401` |
 | Abyss.to | `GET https://api.abyss.to/v1/about?key=...` | `401`/`403` |
+| Streamtape | `GET https://api.streamtape.com/account/info?login=...&key=...` | `401`/`403` or API `400`/`403` |
 | GoFile | `GET https://api.gofile.io/accounts/getid` | `401` (`{"status":"error-token"}`) |
 | interim | `GET <instance>/api/v1/keys/me` when a hash is set (then `/status` if unapproved); `/status` alone when anonymous | `401`/`403`, or `"approved": false` while `public_uploads` is false; anonymous rejected when `public_uploads` is false |
 | DataNodes | `GET https://datanodes.to/api/upload/server?key=...` | body has no `sess_id` (HTTP stays `200`) |

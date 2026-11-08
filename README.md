@@ -6,7 +6,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 
 ## Features
 
-- **Multi-service uploads** — Abyss.to, AnonMP4, BuzzHeavier, DataNodes, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, VikingFile, ZincDrive, and 0x0.st out of the box
+- **Multi-service uploads** — Abyss.to, AnonMP4, BuzzHeavier, DataNodes, FuckingFast, GoFile, interim, Mocha, PixelDrain, storage.to, Streamtape, VikingFile, ZincDrive, and 0x0.st out of the box
 - **Per-command source selection** — upload to specific services for one run with `-s/--sources` without changing your saved defaults
 - **Bulk mode** — upload a list of files one by one to a single source and collect every URL at the end
 - **Self-hosted interim instances** — interim is open source; add any number of instances and upload to them alongside the main one
@@ -36,6 +36,7 @@ Blazing fast multi-service file uploader. Upload files to multiple hosting servi
 | [Mocha](https://mocha.my) | **Required** (API_TOKEN) | Multipart presigned PUT | 20 GiB per file |
 | [PixelDrain](https://pixeldrain.com) | **Required** (API_TOKEN) | Raw PUT | Plan-dependent |
 | [storage.to](https://storage.to) | Optional (API_TOKEN) | init → presigned PUT → confirm | 25 GB free / 100 GB paid |
+| [Streamtape](https://streamtape.com) | **Required** (USERNAME + API_TOKEN) | Upload URL → multipart POST | Account storage limit |
 | [VikingFile](https://vikingfile.com) | Optional (API_TOKEN) | Streaming multipart | Unlimited |
 | [ZincDrive](https://zincdrive.com) | **Required** (API_TOKEN) | S3 presigned PUT | 10 GB |
 
@@ -73,6 +74,12 @@ Abyss.to is a permanent video host and requires an account API key. Its upload
 endpoint takes the key in the URL path, returns a `slug`, and the public watch
 page is `https://abysscdn.com/?v={slug}`. Conversion is asynchronous, so a
 freshly uploaded video may take time to become playable.
+
+Streamtape also requires an account, but uses two values: the API login and the
+API key, both found under **Account Settings** in the Streamtape user panel.
+manyup first asks Streamtape for a short-lived upload URL, then streams the file
+as multipart field `file1`; the returned `streamtape.com/v/...` URL is the public
+link. Conversion is asynchronous.
 
 ## Installation
 
@@ -311,7 +318,7 @@ manyup upload myfile.zip
 
 ### Configure credentials
 
-Only needed for services that require authentication (currently Abyss.to, DataNodes, Mocha, PixelDrain and ZincDrive) and for services where you want to tie uploads to an account. interim accepts anonymous uploads on public instances but needs an approved hash on restricted instances:
+Only needed for services that require authentication (currently Abyss.to, DataNodes, Mocha, PixelDrain, Streamtape and ZincDrive) and for services where you want to tie uploads to an account. interim accepts anonymous uploads on public instances but needs an approved hash on restricted instances:
 
 ```bash
 # Omit the value to paste the token at a prompt — works with any characters
@@ -337,6 +344,10 @@ manyup config set gofile your_gofile_token
 
 # PixelDrain (required — uploads are rejected without a key)
 manyup config set pixeldrain your_pixeldrain_api_key
+
+# Streamtape (required — API login, then API key; both are verified together)
+manyup config set streamtape USERNAME your_api_login
+manyup config set streamtape API_TOKEN your_api_key
 
 # BuzzHeavier (optional — works anonymous)
 manyup config set buzzheavier your_account_id
@@ -461,7 +472,7 @@ $ manyup config set mocha mocha_correct
 ✓ Set mocha/API_TOKEN (verified)
 ```
 
-Services with a known check: Abyss.to, Mocha, GoFile, DataNodes, interim, ZincDrive, BuzzHeavier, PixelDrain.
+Services with a known check: Abyss.to, Streamtape, Mocha, GoFile, DataNodes, interim, ZincDrive, BuzzHeavier, PixelDrain.
 For interim a hash is checked with `GET /keys/me`; an unapproved hash (and an
 anonymous configuration) is rejected when `public_uploads` is false and accepted
 when it is true. `accepting_uploads: false` is reported as "could not verify"
@@ -497,7 +508,7 @@ lists the subcommands:
 
 ```
 $ manyup config set <TAB>
-0x0  abyss  anonmp4  buzzheavier  datanodes  gofile  interim  mocha  pixeldrain  vikingfile  zincdrive
+0x0  abyss  anonmp4  buzzheavier  datanodes  gofile  interim  mocha  pixeldrain  streamtape  vikingfile  zincdrive
 ```
 
 #### cmd.exe
@@ -571,6 +582,8 @@ export MANYUP_ABYSS_API_TOKEN=your_abyss_api_key
 export MANYUP_DATANODES_API_TOKEN=your_key
 export MANYUP_INTERIM_API_TOKEN=interim_xxxxxxxxxxxxxxxxx
 export MANYUP_MOCHA_API_TOKEN=mocha_xxxxxxxxxxxxxxxxx
+export MANYUP_STREAMTAPE_USERNAME=your_api_login
+export MANYUP_STREAMTAPE_API_TOKEN=your_api_key
 export MANYUP_ZINCDRIVE_API_TOKEN=your_key
 export MANYUP_GOFILE_API_TOKEN=your_token
 export MANYUP_PIXELDRAIN_API_TOKEN=your_token
@@ -638,6 +651,7 @@ manyup/
 │       ├── 0x0.go                   # 0x0.st plugin (multipart POST upload)
 │       ├── pixeldrain.go            # PixelDrain plugin (PUT upload)
 │       ├── storageto.go             # storage.to plugin (presigned PUT, multipart)
+│       ├── streamtape.go            # Streamtape plugin (upload URL + multipart POST)
 │       ├── vikingfile.go            # VikingFile plugin (legacy + chunked fallback)
 │       └── zincdrive.go             # ZincDrive plugin (S3 presigned upload)
 ```

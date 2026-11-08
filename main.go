@@ -595,7 +595,11 @@ func cmdConfig() {
 
 		// Check the credential first: a token the service refuses is a typo,
 		// and persisting it would only postpone the failure to upload time.
-		note, verifyErr := authenticateCredential(svc, key, value)
+		var existing plugin.Credentials
+		if sc, ok := cfg.Services[service]; ok {
+			existing = sc.Credentials
+		}
+		note, verifyErr := authenticateCredential(svc, key, value, existing)
 		if verifyErr != nil {
 			fmt.Fprintf(os.Stderr, "✗ %v\n", verifyErr)
 			fmt.Fprintln(os.Stderr, "Credential was not saved.")
@@ -838,7 +842,7 @@ func cmdInterimAdd(cfg *config.AppConfig, args []string) {
 	instance := services.NewInterim(service, origin)
 	note := ""
 	if token != "" {
-		note, err = authenticateCredential(instance, "API_TOKEN", token)
+		note, err = authenticateCredential(instance, "API_TOKEN", token, nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "✗ %v\n", err)
 			fmt.Fprintln(os.Stderr, "Instance was not added.")
@@ -1050,7 +1054,7 @@ func readOptionalSecretValue(r io.Reader) (string, error) {
 // service. Options such as a folder id are not credentials and are not checked.
 func isCredentialKey(key string) bool {
 	switch key {
-	case "API_TOKEN", "API_KEY", "TOKEN":
+	case "API_TOKEN", "API_KEY", "TOKEN", "USERNAME", "PASSWORD":
 		return true
 	}
 	return false
@@ -1064,7 +1068,7 @@ func isCredentialKey(key string) bool {
 // host is unreachable, rate limiting, or the service has no verifier — the
 // credential is still saved and the note says so, because refusing would make
 // configuration impossible whenever a host is down.
-func authenticateCredential(svc plugin.Uploader, key, value string) (string, error) {
+func authenticateCredential(svc plugin.Uploader, key, value string, existing plugin.Credentials) (string, error) {
 	if !isCredentialKey(key) {
 		return "", nil
 	}
@@ -1074,10 +1078,19 @@ func authenticateCredential(svc plugin.Uploader, key, value string) (string, err
 		return "(saved without verification — this service has no credential check)", nil
 	}
 
+	// Verify with the credential being changed plus anything already stored for
+	// the service. Services such as Streamtape need two values to authenticate,
+	// and they are naturally entered one at a time.
+	creds := make(plugin.Credentials, len(existing)+1)
+	for k, v := range existing {
+		creds[k] = v
+	}
+	creds[key] = value
+
 	ctx, cancel := context.WithTimeout(context.Background(), credentialTimeout)
 	defer cancel()
 
-	err := verifier.VerifyCredentials(ctx, plugin.Credentials{key: value}, nil)
+	err := verifier.VerifyCredentials(ctx, creds, nil)
 	switch {
 	case err == nil:
 		return "(verified)", nil

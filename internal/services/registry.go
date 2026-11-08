@@ -42,6 +42,7 @@ func buildRegistry(cfg *config.AppConfig) *plugin.Registry {
 	RegisterZeroXZero(r)
 	RegisterPixelDrain(r)
 	RegisterStorageTo(r)
+	RegisterStreamtape(r)
 	RegisterVikingFile(r)
 	RegisterZincDrive(r)
 	return r

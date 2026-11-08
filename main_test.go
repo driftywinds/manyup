@@ -397,12 +397,12 @@ func TestInterimServicesListsDefaultFirst(t *testing.T) {
 }
 
 func TestIsCredentialKey(t *testing.T) {
-	for _, key := range []string{"API_TOKEN", "API_KEY", "TOKEN"} {
+	for _, key := range []string{"API_TOKEN", "API_KEY", "TOKEN", "USERNAME", "PASSWORD"} {
 		if !isCredentialKey(key) {
 			t.Errorf("isCredentialKey(%q) = false, want true", key)
 		}
 	}
-	for _, key := range []string{"path", "folder_id", "USERNAME", "PASSWORD", ""} {
+	for _, key := range []string{"path", "folder_id", ""} {
 		if isCredentialKey(key) {
 			t.Errorf("isCredentialKey(%q) = true, want false", key)
 		}
@@ -461,7 +461,7 @@ func TestCompletionCandidates(t *testing.T) {
 
 	t.Run("config set offers every service", func(t *testing.T) {
 		got := completionCandidates([]string{"config", "set"})
-		for _, want := range []string{"mocha", "gofile", "pixeldrain", "vikingfile", "zincdrive", "buzzheavier", "datanodes", "anonmp4", "abyss", "0x0"} {
+		for _, want := range []string{"mocha", "gofile", "pixeldrain", "vikingfile", "zincdrive", "buzzheavier", "datanodes", "anonmp4", "abyss", "streamtape", "0x0"} {
 			if !contains(got, want) {
 				t.Errorf("candidates %v missing %q", got, want)
 			}
