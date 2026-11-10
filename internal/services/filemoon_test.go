@@ -41,6 +41,8 @@ type filemoonTestServer struct {
 	chunkTotals    []int
 	accountStatus  int
 	accountSuccess bool
+	premiumKnown   bool
+	premiumActive  bool
 	modernResponse bool
 }
 
@@ -54,6 +56,8 @@ func newFileMoonTestServer(t *testing.T) *filemoonTestServer {
 		s.auth = r.Header.Get("Authorization")
 		status := s.accountStatus
 		success := s.accountSuccess
+		premiumKnown := s.premiumKnown
+		premiumActive := s.premiumActive
 		s.mu.Unlock()
 		if status == 0 {
 			status = http.StatusOK
@@ -61,7 +65,15 @@ func newFileMoonTestServer(t *testing.T) *filemoonTestServer {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if success {
-			_, _ = io.WriteString(w, `{"success":true,"data":{"id":"acct","username":"user"}}`)
+			data := map[string]any{"id": "acct", "username": "user"}
+			if premiumKnown {
+				premiumStatus := "free"
+				if premiumActive {
+					premiumStatus = "premium"
+				}
+				data["premium"] = map[string]any{"active": premiumActive, "status": premiumStatus}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data})
 			return
 		}
 		_, _ = io.WriteString(w, `{"success":false,"error":{"code":"UNAUTHENTICATED","message":"bad token"}}`)
@@ -148,7 +160,9 @@ func newFileMoonTestServer(t *testing.T) *filemoonTestServer {
 
 		w.Header().Set("Content-Type", "application/json")
 		if isChunk && chunkIndex >= 0 && chunkIndex < totalChunks-1 {
-			_, _ = io.WriteString(w, `{"type":"success","status":"success","chunk":true,"finished":false,"message":"Chunk uploaded successfully."}`)
+			// Live FileMoon responses are not consistent about the optional
+			// "finished" field; the uploader must still treat this as partial.
+			_, _ = io.WriteString(w, `{"type":"success","status":"success","chunk":true,"message":"Chunk uploaded successfully."}`)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -335,6 +349,30 @@ func TestFileMoonUploadError(t *testing.T) {
 		plugin.Credentials{"API_TOKEN": "token"}, nil)
 	if err == nil {
 		t.Fatal("expected an error")
+	}
+}
+
+func TestFileMoonFreeAccountRejectsOverFourGB(t *testing.T) {
+	srv := newFileMoonTestServer(t)
+	srv.mu.Lock()
+	srv.premiumKnown = true
+	srv.premiumActive = false
+	srv.mu.Unlock()
+
+	_, err := (&FileMoon{}).Upload(
+		context.Background(), "huge.mkv", strings.NewReader("x"), 5<<30,
+		plugin.Credentials{"API_TOKEN": "token"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "4 GB") {
+		t.Fatalf("err = %v, want free-account limit error", err)
+	}
+}
+
+func TestFileMoonRejectsOverFifteenGB(t *testing.T) {
+	_, err := (&FileMoon{}).Upload(
+		context.Background(), "huge.mkv", strings.NewReader("x"), 16<<30,
+		plugin.Credentials{"API_TOKEN": "token"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "15 GB") {
+		t.Fatalf("err = %v, want 15 GB limit error", err)
 	}
 }
 

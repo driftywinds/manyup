@@ -24,7 +24,11 @@ var (
 	filemoonChunkSize      int64 = 90 << 20
 )
 
-const filemoonResponseLimit = 1 << 20
+const (
+	filemoonResponseLimit = 1 << 20
+	filemoonFreeLimit     = int64(4) << 30
+	filemoonPremiumLimit  = int64(15) << 30
+)
 
 // FileMoon uploads videos through a Bearer-token API. Small files go in one
 // multipart POST; larger files are split into 90 MB chunks at the same
@@ -96,6 +100,18 @@ func (f *FileMoon) Upload(
 	}
 	if size <= 0 {
 		return nil, fmt.Errorf("filemoon: cannot upload an empty file")
+	}
+	if size > filemoonPremiumLimit {
+		return nil, fmt.Errorf("filemoon: file is %.1f GB; the maximum FileMoon file size is 15 GB", float64(size)/(1<<30))
+	}
+	if size > filemoonFreeLimit {
+		premium, known, err := f.accountPremium(ctx, apiToken)
+		if err != nil {
+			return nil, fmt.Errorf("filemoon: could not confirm the account tier for a file over 4 GB: %w", err)
+		}
+		if known && !premium {
+			return nil, fmt.Errorf("filemoon: free accounts are limited to 4 GB per file; this file is %.1f GB. Upgrade to Premium for up to 15 GB", float64(size)/(1<<30))
+		}
 	}
 
 	visibility := optionValue(cfg, "visibility")
@@ -170,17 +186,14 @@ func (f *FileMoon) uploadChunked(
 			reporter.ReportUploaded(uploaded)
 		}
 
-		// The final legacy response has shared_id/download_link and no
-		// "finished" field; intermediate chunks explicitly say finished:false.
-		if env.SharedID != "" || (env.Data != nil && env.Data.ID != "") {
-			return filemoonResult(env, filename, size)
+		// Only the last chunk must return the file. FileMoon's intermediate
+		// success response is not consistent about including "finished": some
+		// large uploads return {"type":"success","chunk":true} with no ID and no
+		// finished field. Treat every earlier successful chunk as intermediate.
+		if index < totalChunks-1 {
+			continue
 		}
-		if env.Finished != nil && *env.Finished {
-			return filemoonResult(env, filename, size)
-		}
-		if env.Finished == nil {
-			return nil, fmt.Errorf("filemoon: chunk %d/%d returned no file id", index+1, totalChunks)
-		}
+		return filemoonResult(env, filename, size)
 	}
 
 	return nil, fmt.Errorf("filemoon: chunked upload completed without a final response")
@@ -225,6 +238,12 @@ func filemoonPostUpload(
 	if env.Error != nil {
 		return nil, fmt.Errorf("filemoon: %s: %s", env.Error.Code, env.Error.Message)
 	}
+	if env.Type != "" && !strings.EqualFold(env.Type, "success") {
+		return nil, fmt.Errorf("filemoon: upload failed: %s", describeBody(respBody))
+	}
+	if env.Status != "" && !strings.EqualFold(env.Status, "success") {
+		return nil, fmt.Errorf("filemoon: upload failed: %s", describeBody(respBody))
+	}
 	if !env.Success && env.Type == "" && env.SharedID == "" && (env.Data == nil || env.Data.ID == "") {
 		return nil, fmt.Errorf("filemoon: upload failed: %s", describeBody(respBody))
 	}
@@ -259,6 +278,42 @@ func filemoonResult(env *filemoonUploadEnvelope, filename string, size int64) (*
 		Size:     size,
 		URL:      pageURL,
 	}, nil
+}
+
+// accountPremium reports whether the token's account is premium. known is false
+// when the account response has no premium field (older API shapes), in which
+// case the server remains the authority on the file-size limit.
+func (f *FileMoon) accountPremium(ctx context.Context, apiToken string) (premium, known bool, err error) {
+	status, body, err := authGet(ctx, filemoonAPIBaseURL+"/account", "Authorization", "Bearer "+apiToken)
+	if err != nil {
+		return false, false, err
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return false, true, fmt.Errorf("filemoon: %w: %s", plugin.ErrCredentialRejected, describeBody(body))
+	}
+	if status < 200 || status >= 300 {
+		return false, false, statusError("filemoon", status, body)
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Premium *struct {
+				Active bool   `json:"active"`
+				Status string `json:"status"`
+			} `json:"premium"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false, false, err
+	}
+	if !payload.Success {
+		return false, false, fmt.Errorf("filemoon: account check failed")
+	}
+	if payload.Data.Premium == nil {
+		return false, false, nil
+	}
+	return payload.Data.Premium.Active || strings.EqualFold(payload.Data.Premium.Status, "premium"), true, nil
 }
 
 // VerifyCredentials calls GET /account, the documented account endpoint.

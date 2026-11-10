@@ -170,8 +170,10 @@ Intermediate chunk response:
 }
 ```
 
-The final chunk returns the same legacy upload response shown above with
-`shared_id` and `download_link`.
+The live service does not reliably include `finished` on intermediate
+responses; manyup treats every chunk before the last as intermediate and only
+requires a file ID on the final chunk. The final chunk returns the same legacy
+upload response shown above with `shared_id` and `download_link`.
 
 manyup streams each chunk directly from the file reader with an exact
 `Content-Length`; it does not load the whole file into memory. A chunk failure is
@@ -234,7 +236,9 @@ fail fast.
 - **Timeout.** Uploads use a copy of the shared client with no whole-request
   timeout; context cancellation still aborts.
 - **File limits.** Free accounts are documented at 4 GB/file and premium at
-  15 GB/file. manyup does not pre-check the account tier; the server enforces it.
+  15 GB/file. For files over 4 GB manyup checks `/account` first and refuses a
+  free account before uploading, so it does not waste bandwidth filling up the
+  free allowance. Files over 15 GB are rejected locally.
 - **`SupportsLargeUpload()`** is `true`.
 
 Config example:
@@ -262,5 +266,6 @@ were deleted through the API.
 - **No resumable chunk upload.** Chunks are uploaded once; a chunk network
   failure restarts the whole file at the uploader level.
 - **No remote-upload support.** `remote:write` endpoints are not used.
-- **No preflight checks.** File-size plan limits and video validation are left
-  to FileMoon.
+- **Tier check for large files.** Files over 4 GB require a premium account;
+  manyup checks the account tier before starting. Video validation is still
+  left to FileMoon.
