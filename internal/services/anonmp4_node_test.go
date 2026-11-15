@@ -311,10 +311,10 @@ func TestAnonMP4NodeVideoInfoFailure(t *testing.T) {
 
 func TestAnonMP4ChunkRejection(t *testing.T) {
 	cases := map[string]string{
-		"0-1023/1024": "",
+		"0-1023/1024":          "",
 		`{"status":"success"}`: "",
-		`{"status":"error","message":"bad chunk"}`: "bad chunk",
-		`{"success":false,"message":"nope"}`:       "nope",
+		`{"status":"error","message":"bad chunk"}`:        "bad chunk",
+		`{"success":false,"message":"nope"}`:              "nope",
 		`{"error":{"code":"E_CHUNK","message":"failed"}}`: "E_CHUNK: failed",
 	}
 	for body, want := range cases {
@@ -432,6 +432,23 @@ func (s *anonMP4RaceServer) snapshot() (map[int]map[int]bool, string) {
 		chunks[node] = copyIndexes
 	}
 	return chunks, s.videoToken
+}
+
+func TestAnonMP4GetUploadNodeEmptyResponseIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	originalBase := anonMP4WebBaseURL
+	anonMP4WebBaseURL = srv.URL
+	t.Cleanup(func() { anonMP4WebBaseURL = originalBase })
+
+	_, err := (&AnonMP4{}).getUploadNode(context.Background(), "movie.mp4", "client")
+	if err == nil || !strings.Contains(err.Error(), "status 503") {
+		t.Fatalf("err = %v, want retryable status 503", err)
+	}
 }
 
 func TestAnonMP4NodeRacePicksHealthyNode(t *testing.T) {

@@ -62,7 +62,7 @@ const (
 	// anonMP4ClientToken is the public client token embedded in the AnonMP4
 	// website. It is not an account credential; it identifies the anonymous
 	// upload client to the node allocator.
-	anonMP4ClientToken = "TVRBYTRMcTBwOTRMcTBJYzZNQzQ0TUhkN2M2T0R4N2M2TnEwTTFOYTR4N2E0"
+	anonMP4ClientToken = "TVRBYTRMcTBwOTRMcTBJYzZNQzQyTW02ZDdjNk9EeDdjNk5xME0xTmE0eDdhNA"
 
 	anonMP4UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 )
@@ -238,14 +238,20 @@ func (a *AnonMP4) uploadWithNodeRace(
 ) (*plugin.UploadResult, error) {
 	totalChunks := int((size + chunkSize - 1) / chunkSize)
 
+	// Allocate before reading so a total allocator failure can still use the
+	// documented single-POST endpoint with an untouched reader.
+	nodes, err := a.allocateNodes(ctx, uploadName, clientToken, anonMP4NodeCandidates)
+	if err != nil {
+		result, legacyErr := a.uploadLegacy(ctx, filename, reader, size)
+		if legacyErr != nil {
+			return nil, fmt.Errorf("anonmp4: node API failed (%v); documented upload also failed: %w", err, legacyErr)
+		}
+		return result, nil
+	}
+
 	first, err := anonMP4ReadChunk(reader, 1, chunkSize, size)
 	if err != nil {
 		return nil, fmt.Errorf("anonmp4: reading first chunk: %w", err)
-	}
-
-	nodes, err := a.allocateNodes(ctx, uploadName, clientToken, anonMP4NodeCandidates)
-	if err != nil {
-		return nil, err
 	}
 
 	winner, err := a.raceFirstChunk(ctx, nodes, uploadName, totalChunks, size, first)
@@ -413,6 +419,13 @@ func (a *AnonMP4) getUploadNode(ctx context.Context, filename, clientToken strin
 	}
 	if status < 200 || status >= 300 {
 		return nil, statusError("anonmp4: get-upload-node", status, body)
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		// The allocator currently returns 200 with an empty body for valid
+		// tokens. Report it as a retryable upstream 503 so the uploader's
+		// normal file-level retry handles transient outages.
+		return nil, statusError("anonmp4: get-upload-node", http.StatusServiceUnavailable,
+			[]byte("empty response; allocator outage"))
 	}
 
 	var node anonMP4Node

@@ -36,7 +36,7 @@ sends a `client_token` field, but it is embedded in the public page, is not an
 account credential, and grants no identity:
 
 ```
-client_token = TVRBYTRMcTBwOTRMcTBJYzZNQzQ0TUhkN2M2T0R4N2M2TnEwTTFOYTR4N2E0
+client_token = TVRBYTRMcTBwOTRMcTBJYzZNQzQyTW02ZDdjNk9EeDdjNk5xME0xTmE0eDdhNA
 ```
 
 The plugin sends that token by default. It can be overridden with the
@@ -58,7 +58,7 @@ This is the flow used by the AnonMP4 website and by manyup.
 POST https://anonmp4.to/get-upload-node
 Content-Type: multipart/form-data; boundary=…
 
-client_token=TVRBYTRMcTBwOTRMcTBJYzZNQzQ0TUhkN2M2T0R4N2M2TnEwTTFOYTR4N2E0
+client_token=TVRBYTRMcTBwOTRMcTBJYzZNQzQyTW02ZDdjNk9EeDdjNk5xME0xTmE0eDdhNA
 filename=video.mp4
 ```
 
@@ -135,7 +135,7 @@ Content-Type: multipart/form-data; boundary=…
 
 node_id=MTY5ODt31OTAc6ODA4Na4E
 node_token=z9HR0x7HM6Lb59g0Ln79i2Lm6J1L2Ri2P2Ji2PUV…
-client_token=TVRBYTRMcTBwOTRMcTBJYzZNQzQ0TUhkN2M2T0R4N2M2TnEwTTFOYTR4N2E0
+client_token=TVRBYTRMcTBwOTRMcTBJYzZNQzQyTW02ZDdjNk9EeDdjNk5xME0xTmE0eDdhNA
 filename=video.mp4
 ```
 
@@ -299,9 +299,13 @@ answers Apache `503`.
   does not spike on each chunk completion and collapse to 0 B/s between them.
 - **Control calls.** `/get-upload-node` and `/get-video-node` post small
   multipart forms with `client_token`, `filename`, `node_id`, and `node_token`.
-  A failure in node allocation before the first chunk falls back to the
-  documented single-POST endpoint. A failure during the node race or after chunks
-  have been sent does not fall back, to avoid uploading the file twice.
+  A `200` with an empty body is treated as the allocator’s known failure mode
+  and reported as a retryable upstream `503`, so the uploader’s existing
+  file-level retry handles it. It is not retried inside the plugin, which would
+  multiply the uploader’s three attempts. A failure in node allocation before
+  the first chunk falls back to the documented single-POST endpoint. A failure
+  during the node race or after chunks have been sent does not fall back, to
+  avoid uploading the file twice.
 - **Documented fallback.** A streaming multipart body with a single `file` field
   and an exact `Content-Length`. It is only attempted when node allocation fails
   before any file bytes are sent.
@@ -329,6 +333,14 @@ manyup upload video.mp4
 A real 2 KiB CLI upload against the live service succeeded on 2026-11-04 and
 returned `https://anonmp4.art/v/YoSXKQ2sHr2EXq9`.
 
+On 2026-11-15 the allocator was returning HTTP `200` with an empty body for both
+the current public token and the previous one. An invalid token still returns a
+JSON error, so the empty response is issued after token validation; the
+documented `anonmp4api.xyz` API was also still Apache `503`. In that state the
+website’s own uploader cannot get a node either, and a CLI cannot work around a
+server-side allocator outage. The retry and explicit error are the client-side
+handling.
+
 The unit tests use local `httptest` servers for both flows: a node/chunk fake
 that verifies every chunk's index, `Content-Range`, payload, query, and headers,
 and a legacy single-POST fake for the fallback.
@@ -340,6 +352,11 @@ and a legacy single-POST fake for the fallback.
 - **The documented `POST /upload` route is currently unavailable.** The live
   website and the plugin use the node/chunk flow. The documented route remains
   implemented as a fallback in case it is restored.
+- **The node allocator is currently returning empty responses.** On 2026-11-15
+  `POST /get-upload-node` returned `200 application/json` with no body for a
+  structurally valid current token. That is a service-side outage, not a token
+  or uploader bug; the client reports it as a retryable `503` and the uploader
+  retries the file normally.
 - **The node/chunk API is undocumented.** It uses a public client token embedded
   in the website and can change without notice. If it does, the fallback and the
   `client_token` option provide a recovery path.
