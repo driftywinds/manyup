@@ -417,12 +417,13 @@ func cmdUpload() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				continue
 			}
-			printResult(result)
+			printResult(result, filePath)
 		}
 	}
 
 	close(progressCh)
 	<-done
+	display.clear()
 
 	if opts.bulk {
 		printBulkLinks(bulkLinks, len(files), bulkFailures)
@@ -1317,6 +1318,30 @@ func (d *progressDisplay) handle(p uploader.Progress) {
 	}
 }
 
+// clear removes the finished progress bars so the result block starts on a
+// clean line. The cursor is left at the top of where the bars were.
+func (d *progressDisplay) clear() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lineCount == 0 {
+		return
+	}
+	if d.lineCount > 1 {
+		fmt.Printf("\033[%dA", d.lineCount-1)
+	}
+	for i := 0; i < d.lineCount; i++ {
+		fmt.Print("\r\033[K")
+		if i < d.lineCount-1 {
+			fmt.Print("\033[1B")
+		}
+	}
+	if d.lineCount > 1 {
+		fmt.Printf("\033[%dA", d.lineCount-1)
+	}
+	fmt.Print("\r")
+	d.lineCount = 0
+}
+
 // renderAt redraws a single bar line using ANSI cursor movement.
 func (d *progressDisplay) renderAt(bar *serviceBar, idx int) {
 	currentLine := d.lineCount - 1
@@ -1418,17 +1443,54 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm %02ds", m, s)
 }
 
-func printResult(result *uploader.MultiResult) {
-	fmt.Println(strings.Repeat("─", 60))
+func printResult(result *uploader.MultiResult, filePath string) {
+	fmt.Print(formatResult(result, filePath))
+}
+
+// formatResult puts all diagnostic metadata first and leaves only URLs at the
+// bottom, one per line, so the tail can be copied without editing service names
+// or markers.
+func formatResult(result *uploader.MultiResult, filePath string) string {
+	if result == nil {
+		return "No upload result.\n"
+	}
+
+	succeeded := 0
 	for _, r := range result.Results {
-		if r.Error != nil {
-			fmt.Printf("  ✗ %s: %v\n", r.Service, r.Error)
-		} else {
-			fmt.Printf("  ✓ %s: %s (%.1fs)\n", r.Service, r.URL, r.Duration)
+		if r.Error == nil && r.URL != "" {
+			succeeded++
 		}
 	}
-	fmt.Printf("  Total time: %.1fs\n", result.TotalTime)
-	fmt.Println(strings.Repeat("─", 60))
+	failed := len(result.Results) - succeeded
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "File: %s\n", filePath)
+	fmt.Fprintf(&b, "Size: %s\n", formatBytes(float64(result.Size)))
+	fmt.Fprintf(&b, "Services: %d succeeded, %d failed\n", succeeded, failed)
+	fmt.Fprintf(&b, "Total time: %.1fs\n\nResults:\n", result.TotalTime)
+	for _, r := range result.Results {
+		switch {
+		case r.Error != nil:
+			fmt.Fprintf(&b, "  %-14s %6.1fs  failed: %v\n", r.Service, r.Duration, r.Error)
+		case r.URL == "":
+			fmt.Fprintf(&b, "  %-14s %6.1fs  failed: no URL returned\n", r.Service, r.Duration)
+		default:
+			fmt.Fprintf(&b, "  %-14s %6.1fs  ok\n", r.Service, r.Duration)
+		}
+	}
+
+	b.WriteString("\n")
+	if succeeded == 0 {
+		b.WriteString("No uploads succeeded.\n")
+		return b.String()
+	}
+	for _, r := range result.Results {
+		if r.Error == nil && r.URL != "" {
+			b.WriteString(r.URL)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
 }
 
 // ── Platform detection ──────────────────────────────────────────────────

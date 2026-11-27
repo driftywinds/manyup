@@ -249,6 +249,55 @@ func TestSingleBulkSource(t *testing.T) {
 	}
 }
 
+func TestFormatResult(t *testing.T) {
+	result := &uploader.MultiResult{
+		Filename:  "file.7z",
+		Size:      1536,
+		TotalTime: 12.3,
+		Results: []*plugin.UploadResult{
+			{Service: "gofile", URL: "https://gofile.io/d/abc", Duration: 2.1},
+			{Service: "anonmp4", Error: os.ErrPermission, Duration: 1.2},
+		},
+	}
+
+	got := formatResult(result, `Y:\Games\file.7z`)
+	for _, want := range []string{
+		"File: Y:\\Games\\file.7z\n",
+		"Size: 1.5 KB\n",
+		"Services: 1 succeeded, 1 failed\n",
+		"Total time: 12.3s\n",
+		"gofile",
+		"ok\n",
+		"anonmp4",
+		"failed: permission denied",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("formatResult missing %q:\n%s", want, got)
+		}
+	}
+	if strings.ContainsAny(got, "✓✗") {
+		t.Errorf("formatResult still contains status ticks:\n%s", got)
+	}
+
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if last := lines[len(lines)-1]; last != "https://gofile.io/d/abc" {
+		t.Errorf("last line = %q, want only the URL", last)
+	}
+}
+
+func TestFormatResultAllFailed(t *testing.T) {
+	result := &uploader.MultiResult{
+		Size: 10,
+		Results: []*plugin.UploadResult{
+			{Service: "anonmp4", Error: os.ErrPermission},
+		},
+	}
+	got := formatResult(result, "file.7z")
+	if !strings.Contains(got, "No uploads succeeded.") {
+		t.Errorf("formatResult missing failure summary:\n%s", got)
+	}
+}
+
 func TestBulkResultURL(t *testing.T) {
 	result := &uploader.MultiResult{Results: []*plugin.UploadResult{
 		{Service: "abyss", URL: "https://abysscdn.com/?v=abc"},

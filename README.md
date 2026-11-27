@@ -577,12 +577,22 @@ manyup upload *.zip video.mp4 document.pdf
 ⬆  Uploading: myfile.zip
   gofile       ████████████████████  100.0%  12.3 MB/s  ETA -
   buzzheavier  ████████████████████  100.0%   8.1 MB/s  ETA -
-────────────────────────────────────────────────────────────
-  ✓ gofile: https://gofile.io/d/abc123 (2.1s)
-  ✓ buzzheavier: https://buzzheavier.com/xyz789 (3.4s)
-  Total time: 3.4s
-────────────────────────────────────────────────────────────
+File: W:\upload\myfile.zip
+Size: 1.5 MB
+Services: 2 succeeded, 0 failed
+Total time: 3.4s
+
+Results:
+  gofile          2.1s  ok
+  buzzheavier     3.4s  ok
+
+https://gofile.io/d/abc123
+https://buzzheavier.com/xyz789
 ```
+
+The final block starts with the file metadata and per-service results. The last
+lines are only the uploaded URLs, one per line, so they can be selected and
+copied together.
 
 ## Configuration
 

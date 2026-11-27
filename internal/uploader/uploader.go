@@ -32,6 +32,7 @@ type Progress struct {
 // MultiResult aggregates results from all services for a single file.
 type MultiResult struct {
 	Filename  string
+	Size      int64
 	Results   []*plugin.UploadResult
 	TotalTime float64
 }
@@ -107,6 +108,7 @@ func (m *UploadManager) UploadFile(
 	start := time.Now()
 	result := &MultiResult{
 		Filename: filename,
+		Size:     stat.Size(),
 		Results:  make([]*plugin.UploadResult, 0, len(services)),
 	}
 
